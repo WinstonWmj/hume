@@ -1,4 +1,4 @@
-DEBUG=false
+DEBUG=true
 if [ "$DEBUG" = true ]; then
   GPUS=1
   PER_DEVICE_BATCH_SIZE=8
@@ -44,7 +44,7 @@ data_map["libero_goal"]=libero_goal_no_noops_1.0.0_lerobot
 data_map["libero_10"]=libero_10_no_noops_1.0.0_lerobot
 
 
-data_name=libero_goal
+data_name=libero_object
 dataset=${data_map[$data_name]}
 echo "dataset: ${dataset}"
 cfg=$(echo $dataset | sed 's/^\([a-zA-Z]\+\).*/\1/')
@@ -52,7 +52,7 @@ cfg=$(echo $dataset | sed 's/^\([a-zA-Z]\+\).*/\1/')
 lr=5e-5
 steps=$((GPUS * 200000))
 chunk_size=4
-pretrained_policy="pretrianed_s2"
+pretrained_policy="/mnt/mnt/public_zgc/models/Hume-vla/Hume-System2/"
 
 job_name=hume_s2_${dataset}_ck${chunk_size}_gpu${GPUS}_lr${lr}_bs${PER_DEVICE_BATCH_SIZE}_s$((steps / 1000))k
 accelerate launch $ACCELERATE_ARGS src/hume/training/train_s2.py \

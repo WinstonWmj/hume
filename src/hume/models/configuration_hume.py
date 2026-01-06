@@ -87,7 +87,7 @@ class HumeConfig(PreTrainedConfig):
 
     # projector
     s1_proj_width: int = 512  # NOTE: consitent with the s1_gemma_expert_config
-    freeze_s1_vision_encoder: bool = False
+    freeze_vision_encoder: bool = False
 
     # decoding
     s1_num_steps: int = 10

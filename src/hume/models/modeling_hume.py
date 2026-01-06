@@ -198,6 +198,7 @@ class HumePolicy(PreTrainedPolicy):
         config: HumeConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
     ):
+        breakpoint()
         super().__init__(config)
         config.validate_features()
         self.config = config
@@ -1335,7 +1336,7 @@ class FastVisuoMatching(nn.Module):
 
         # FastVisuoExpertConfig, FastVisuoExpertModel
         fast_visuo_expertConfig = FastVisuoExpertConfig(
-            freeze_vision_encoder=self.config.freeze_s1_vision_encoder,
+            freeze_vision_encoder=self.config.freeze_vision_encoder,
             attention_implementation=self.config.attention_implementation,
             dino_config=self.config.s1_dino_config,
             gemma_expert_config=self.config.s1_gemma_expert_config,

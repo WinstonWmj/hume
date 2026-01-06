@@ -1,3 +1,17 @@
+# Reproduced by WinstonWmj
+
+1. to bash `scripts/train_s2.sh`, you need to download the model weights and lerobot dataset
+```
+dataset: IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot
+model weight: Hume-vla/Hume-System2
+```
+
+2. to bash `scripts/train_vqh_s1.sh`, you need to download the model weights and lerobot dataset
+```
+dataset: IPEC-COMMUNITY/libero_object_no_noops_1.0.0_lerobot
+model weight: facebook/dinov2-small  # The value head is initialized from scratch.
+```
+
 <div align="center">
 
 # Hume: Introducing System-2 Thinking in Visual-Language-Action Model
@@ -73,7 +87,8 @@ action = hume.infer(observation) # (B, action_dim)
 
 ```bash
 git clone https://github.com/hume-vla/hume.git
-GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv sync  # it will help you create uv enviroment in .venv
+source .venv/bin/activate  # to activate the venv named hume
 ```
 
 

@@ -48,11 +48,12 @@ data_map["libero_10"]=libero_10_no_noops_1.0.0_lerobot
 
 declare -A pretrained_map
 pretrained_map["libero_spatial"]=/path/to/pretrained_system2
-pretrained_map["libero_object"]=/path/to/pretrained_system2
+pretrained_map["libero_object"]=/mnt/mnt/public_zgc/models/Hume-vla/Libero-Object-1
 pretrained_map["libero_goal"]=outputs/hume_s2/2025-06-08/16-38-43_hume_s2_libero_goal_no_noops_1.0.0_lerobot_ck4_gpu1_lr5e-5_bs8_s200k/checkpoints/000005/pretrained_model
 pretrained_map["libero_10"]=/path/to/pretrained_system2
+pretrained_dino_path=/mnt/mnt/public_zgc/models/facebook/dinov2-small
 
-data_name=libero_goal
+data_name=libero_object
 dataset=${data_map[$data_name]}
 echo "dataset: ${dataset}"
 cfg=$(echo $dataset | sed 's/^\([a-zA-Z]\+\).*/\1/')
@@ -103,7 +104,7 @@ echo "job_name: ${job_name}"
 accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${train_args} \
   --pretrained_s2_path=${pretrained_s2_path} \
   --policy.type=hume \
-  --pretrained_dino_path=../pretrained/dinov2-small \
+  --pretrained_dino_path=${pretrained_dino_path} \
   --config_path=config/${cfg}.json \
   --dataset.repo_id=${dataset} \
   --dataset.video_backend="pyav" \

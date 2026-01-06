@@ -998,7 +998,46 @@ class System2Policy(PreTrainedPolicy):
         pretrained_name_or_path,
         **kwargs,
     ):
-        policy = super().from_pretrained(pretrained_name_or_path, **kwargs)
+        # policy = super().from_pretrained(pretrained_name_or_path, **kwargs)
+        import os
+        import glob
+        import safetensors
+        weight_paths = sorted(glob.glob(os.path.join(pretrained_name_or_path, "*.safetensors")))
+        policy = cls(kwargs["config"])
+        
+        # 获取当前模型的state_dict用于形状比较
+        model_state_dict = policy.state_dict()
+        
+        for weight_path in weight_paths:
+            # 加载checkpoint的state_dict
+            checkpoint_state_dict = safetensors.torch.load_file(weight_path)
+            
+            # 过滤掉形状不匹配的键，只保留匹配的权重
+            filtered_state_dict = {}
+            skipped_keys = []
+            for key, value in checkpoint_state_dict.items():
+                if key in model_state_dict:
+                    # 检查形状是否匹配
+                    if value.shape == model_state_dict[key].shape:
+                        filtered_state_dict[key] = value
+                    else:
+                        skipped_keys.append(f"{key}: checkpoint shape {value.shape} != model shape {model_state_dict[key].shape}")
+                else:
+                    skipped_keys.append(f"{key}: key not found in model")
+            
+            # 打印跳过的键
+            if skipped_keys:
+                print(f"Skipping {len(skipped_keys)} mismatched keys from {weight_path}:")
+                for skip_key in skipped_keys:
+                    print(f"  - {skip_key}")
+            
+            # 加载过滤后的权重
+            incompatible_keys = policy.load_state_dict(filtered_state_dict, strict=False)
+            if incompatible_keys.missing_keys:
+                print(f"Missing keys (not in checkpoint): {incompatible_keys.missing_keys}")
+            if incompatible_keys.unexpected_keys:
+                print(f"Unexpected keys (not in model): {incompatible_keys.unexpected_keys}")
+        
         print(f"Loading the language tokenizer from {pretrained_name_or_path} ...")
         policy.language_tokenizer = AutoTokenizer.from_pretrained(
             pretrained_name_or_path

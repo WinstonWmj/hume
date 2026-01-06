@@ -1,14 +1,18 @@
 # set env
 export TZ=UTC-8
-export PYTHONPATH=$PYTHONPATH:$PWD/3rd/LIBERO
+# NOTE: set LIBERO_REPO_PATH to the path of the LIBERO repo
+# export PYTHONPATH=$PYTHONPATH:$PWD/3rd/LIBERO
+export LIBERO_REPO_PATH="/mnt/mnt/public_zgc/home/mjwei/repo/hume/3rd/LIBERO"
+export PYTHONPATH=${LIBERO_REPO_PATH}:$PYTHONPATH
 source experiments/libero/.venv/bin/activate
 
 # Put ckpts here
 ckpts=(
-    exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0090000
-    exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0120000
-    exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0150000
-    exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0190000
+    /mnt/mnt/public_zgc/models/Hume-vla/Libero-Object-1
+    # exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0090000
+    # exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0120000
+    # exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0150000
+    # exported/libero/2025-05-02/08-10-44_libero_goal_ck8-16-1_sh-4_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs16_s1600k/0190000
 )
 
 # Server Info
@@ -64,7 +68,7 @@ time_temp_upper_bound=1.0
 s1_replan_steps=8
 s2_replan_steps=16
 
-task_suite_name=libero_goal
+task_suite_name=libero_object
 
 test_name="s1-${s1_replan_steps}_"\
 "s2-${s2_replan_steps}_"\

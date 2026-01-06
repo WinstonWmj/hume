@@ -1,6 +1,6 @@
 # set environments
 # set your own path to LEROBOT_DATASET
-export HF_LEROBOT_HOME="/mnt/mnt/public_zgc/datasets/IPEC-COMMUNITY/"
+export HF_LEROBOT_HOME="/mnt/mnt/public_zgc/datasets"
 # set your own path to TRITON_CACHE_DIR
 export TRITON_CACHE_DIR="/mnt/mnt/public_zgc/home/mjwei/repo/hume/tmp/.triton"
 export TOKENIZERS_PARALLELISM=false

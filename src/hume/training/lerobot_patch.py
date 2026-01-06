@@ -184,6 +184,9 @@ def make_dataset(
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:
             for stats_type, stats in IMAGENET_STATS.items():
+                # 保证 stats 字典存在相应摄像头的键
+                if key not in dataset.meta.stats:
+                    dataset.meta.stats[key] = {}
                 dataset.meta.stats[key][stats_type] = torch.tensor(
                     stats, dtype=torch.float32
                 )

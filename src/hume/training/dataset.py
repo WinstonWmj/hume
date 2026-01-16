@@ -29,6 +29,17 @@ from lerobot.common.robot_devices.robots.utils import Robot
 
 CODEBASE_VERSION = "v2.1"
 
+# State indices for behavior dataset (R1Pro robot)
+# Selecting 25 dimensions from the original 256-dim state
+BEHAVIOR_STATE_INDICES = [
+    *range(253, 256),   # base_qvel: 3
+    *range(236, 240),   # trunk_qpos: 4
+    *range(158, 165),   # arm_left_qpos: 7
+    *range(193, 195),   # gripper_left_qpos: 2
+    *range(197, 204),   # arm_right_qpos: 7
+    *range(232, 234),   # gripper_right_qpos: 2
+]  # Total: 25 dimensions
+
 
 class LeRobotDataset(BaseLeRobotDataset):
     def __init__(
@@ -50,6 +61,7 @@ class LeRobotDataset(BaseLeRobotDataset):
         num_pos: int = 3,
         next_obs_offset: int = None,
         s1_his_state_size: int = 1,
+        state_indices: list[int] | None = None,
     ):
         super().__init__(
             repo_id=repo_id,
@@ -70,6 +82,7 @@ class LeRobotDataset(BaseLeRobotDataset):
         self.slide = slide
         self.s1_action_steps = s1_action_steps
         self.s1_his_state_size = s1_his_state_size
+        self.state_indices = state_indices  # indices to select from original state
 
         self._state_keys = [
             key for key in self.meta.features.keys() if key.startswith(OBS_ROBOT)
@@ -266,6 +279,16 @@ class LeRobotDataset(BaseLeRobotDataset):
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks[task_idx]
+
+        # Select specific state dimensions if state_indices is provided
+        if self.state_indices is not None:
+            state_key = OBS_ROBOT  # "observation.state"
+            if state_key in item:
+                item[state_key] = item[state_key][..., self.state_indices]
+            s1_state_key = f"{state_key}.s1"
+            if s1_state_key in item:
+                item[s1_state_key] = item[s1_state_key][..., self.state_indices]
+
         return item
 
     @classmethod

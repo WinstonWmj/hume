@@ -509,13 +509,37 @@ class Policy(nn.Module):
     def forward(
         self, encoded_observations: torch.Tensor, temperature: float = 1.0
     ) -> Union[TransformedDistribution, Normal]:
+        # 数值稳定性检查：检测输入是否包含 NaN 或 Inf
+        if torch.isnan(encoded_observations).any() or torch.isinf(encoded_observations).any():
+            print(f"[WARNING] Policy.forward: encoded_observations contains NaN or Inf!")
+            print(f"  NaN count: {torch.isnan(encoded_observations).sum().item()}")
+            print(f"  Inf count: {torch.isinf(encoded_observations).sum().item()}")
+            print(f"  Min: {encoded_observations.min().item()}, Max: {encoded_observations.max().item()}")
+        
         outputs = self.network(encoded_observations)
+        
+        # 检查 MLP 输出
+        if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+            print(f"[WARNING] Policy.forward: MLP outputs contains NaN or Inf!")
+            print(f"  NaN count: {torch.isnan(outputs).sum().item()}")
+            print(f"  Inf count: {torch.isinf(outputs).sum().item()}")
 
         means = self.mean_layer(outputs)
+        
+        # 检查 means
+        if torch.isnan(means).any() or torch.isinf(means).any():
+            print(f"[WARNING] Policy.forward: means contains NaN or Inf!")
+            print(f"  NaN count: {torch.isnan(means).sum().item()}")
+            print(f"  Inf count: {torch.isinf(means).sum().item()}")
+            # 将 NaN 替换为 0 以避免崩溃
+            means = torch.nan_to_num(means, nan=0.0, posinf=1.0, neginf=-1.0)
 
         if self.fixed_std is None:
             if self.std_parameterization == "exp":
                 log_stds = self.std_layer(outputs)
+                # 数值稳定性：裁剪 log_stds 防止 exp 溢出
+                # bfloat16: 裁剪到 [-20, 2] 范围，避免 exp 溢出或下溢
+                log_stds = torch.clamp(log_stds, -20, 2)
                 stds = torch.exp(log_stds)
             elif self.std_parameterization == "softplus":
                 stds = self.std_layer(outputs)
@@ -532,6 +556,13 @@ class Policy(nn.Module):
         stds = torch.clamp(stds, self.std_min, self.std_max) * torch.sqrt(
             torch.tensor(temperature)
         )
+        
+        # 检查 stds
+        if torch.isnan(stds).any() or torch.isinf(stds).any():
+            print(f"[WARNING] Policy.forward: stds contains NaN or Inf!")
+            print(f"  NaN count: {torch.isnan(stds).sum().item()}")
+            print(f"  Inf count: {torch.isinf(stds).sum().item()}")
+            stds = torch.nan_to_num(stds, nan=self.std_min, posinf=self.std_max, neginf=self.std_min)
 
         if self.tanh_squash_distribution:
             distribution = TanhMultivariateNormalDiag(

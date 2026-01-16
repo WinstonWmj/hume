@@ -253,9 +253,15 @@ class ImageTransforms(Transform):
 
         self.weights = []
         self.transforms = {}
+        # Extract resize size from RandomResizedCrop if present
+        self.final_resize_size = None
         for tf_name, tf_cfg in cfg.tfs.items():
             if tf_cfg.weight <= 0.0:
                 continue
+            
+            # Store the target size from RandomResizedCrop for final resize
+            if tf_cfg.type == "RandomResizedCrop" and "size" in tf_cfg.kwargs:
+                self.final_resize_size = tf_cfg.kwargs["size"]
 
             self.transforms[tf_name] = make_transform_from_config(tf_cfg)
             self.weights.append(tf_cfg.weight)
@@ -264,12 +270,21 @@ class ImageTransforms(Transform):
         if n_subset == 0 or not cfg.enable:
             self.tf = v2.Identity()
         else:
-            self.tf = RandomSubsetApply(
+            # Apply random subset of transforms, then deterministic resize
+            random_transforms = RandomSubsetApply(
                 transforms=list(self.transforms.values()),
                 p=self.weights,
                 n_subset=n_subset,
                 random_order=cfg.random_order,
             )
+            # Add final resize to ensure consistent size across all images
+            if self.final_resize_size is not None:
+                self.tf = v2.Compose([
+                    random_transforms,
+                    v2.Resize(self.final_resize_size, antialias=True)
+                ])
+            else:
+                self.tf = random_transforms
 
     def forward(self, *inputs: Any) -> Any:
         return self.tf(*inputs)

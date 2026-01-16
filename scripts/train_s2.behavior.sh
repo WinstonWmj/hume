@@ -1,7 +1,7 @@
-DEBUG=true
+DEBUG=false
 if [ "$DEBUG" = true ]; then
   GPUS=1
-  PER_DEVICE_BATCH_SIZE=8
+  PER_DEVICE_BATCH_SIZE=1
   wandb_enable=false
   ACCELERATE_ARGS="--num_machines 1 --num_processes ${GPUS} --mixed_precision=bf16 --dynamo_backend=no"
   num_workers=0
@@ -9,14 +9,20 @@ if [ "$DEBUG" = true ]; then
   steps=10
 fi
 
+NCCL_DEBUG=INFO
+
 # distributed settings
-GPUS=${GPUS:-2}
-GPUS_PER_NODE=${GPUS_PER_NODE:-2}
+GPUS=${GPUS:-4}
+GPUS_PER_NODE=${GPUS_PER_NODE:-4}
 NODES=$((GPUS / GPUS_PER_NODE))
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-32}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-8}
+# NOTE: Set wandb_enable=false by default to avoid blocking in multi-GPU training
+# To enable wandb, ensure WANDB_API_KEY is set and network is available, then:
+#   wandb_enable=true bash scripts/train_s2.behavior.sh
 wandb_enable=${wandb_enable:-true}
+wandb_mode=${wandb_mode:-offline}
 num_workers=${num_workers:-0}
-save_freq=${save_freq:-5000}
+save_freq=${save_freq:-10000}
 
 # set environments
 source scripts/env.behavior.sh
@@ -54,9 +60,9 @@ cfg=$(echo $dataset | sed 's/^\([a-zA-Z]\+\).*/\1/')
 
 lr=5e-5
 steps=$((GPUS * 200000))
-chunk_size=4
-pretrained_policy="/mnt/mnt/public_zgc/models/pi0_pytorch"
-pretrained_policy="/mnt/mnt/public_zgc/models/Hume-vla/Hume-System2/"
+chunk_size=30
+# pretrained_policy="/mnt/mnt/public_zgc/models/pi0_pytorch"
+pretrained_policy="/mnt/project_rlinf/mjwei/download_models/Hume-vla/Hume-System2/"
 
 job_name=hume_s2_${dataset}_ck${chunk_size}_gpu${GPUS}_lr${lr}_bs${PER_DEVICE_BATCH_SIZE}_s$((steps / 1000))k
 accelerate launch $ACCELERATE_ARGS src/hume/training/train_s2.py \
@@ -72,6 +78,7 @@ accelerate launch $ACCELERATE_ARGS src/hume/training/train_s2.py \
   --log_freq=100 \
   --job_name=${job_name} \
   --wandb.enable=${wandb_enable} \
+  --wandb.mode=${wandb_mode} \
   --wandb.disable_artifact=true \
   --wandb.project=${WANDB_PROJECT} \
   --wandb.entity=${WANDB_ENTITY} \

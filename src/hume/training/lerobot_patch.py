@@ -29,7 +29,7 @@ from torch import nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 
-from hume.training.dataset import LeRobotDataset
+from hume.training.dataset import BEHAVIOR_STATE_INDICES, LeRobotDataset
 from hume.training.transforms import ImageTransforms
 
 IMAGENET_STATS = {
@@ -161,6 +161,21 @@ def make_dataset(
         ds_meta = LeRobotDatasetMetadata(
             cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
         )
+        
+        # Use state_indices for behavior dataset to select 25 dims from 256
+        state_indices = (
+            BEHAVIOR_STATE_INDICES if cfg.dataset.repo_id == "behavior" else None
+        )
+        
+        # Filter ds_meta.stats to match the selected state dimensions
+        if state_indices is not None and "observation.state" in ds_meta.stats:
+            import numpy as np
+            old_stats = ds_meta.stats["observation.state"]
+            ds_meta.stats["observation.state"] = {
+                k: (np.array(v)[state_indices] if isinstance(v, (list, np.ndarray)) and len(v) > max(state_indices) else v)
+                for k, v in old_stats.items()
+            }
+        
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
@@ -177,9 +192,19 @@ def make_dataset(
             discount=cfg.policy.discount,
             next_obs_offset=cfg.policy.next_obs_offset,
             s1_his_state_size=cfg.policy.s1_his_state_size,
+            state_indices=state_indices,
         )
     else:
         raise NotImplementedError("The MultiLeRobotDataset isn't supported for now.")
+
+    # Also filter dataset.meta.stats (used by train_s2.py when calling make_policy)
+    if state_indices is not None and "observation.state" in dataset.meta.stats:
+        import numpy as np
+        old_dataset_stats = dataset.meta.stats["observation.state"]
+        dataset.meta.stats["observation.state"] = {
+            k: (np.array(v)[state_indices] if isinstance(v, (list, np.ndarray)) and len(v) > max(state_indices) else v)
+            for k, v in old_dataset_stats.items()
+        }
 
     if cfg.dataset.use_imagenet_stats:
         for key in dataset.meta.camera_keys:

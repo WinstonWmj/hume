@@ -998,12 +998,41 @@ class System2Policy(PreTrainedPolicy):
         pretrained_name_or_path,
         **kwargs,
     ):
+        print(f"[DEBUG ENTRY] System2Policy.from_pretrained called with path: {pretrained_name_or_path}")
+        import sys
+        sys.stdout.flush()
+        
         # policy = super().from_pretrained(pretrained_name_or_path, **kwargs)
         import os
         import glob
         import safetensors
+        
+        # Load config from the pretrained directory
+        if "config" not in kwargs:
+            config = cls.config_class.from_pretrained(pretrained_name_or_path)
+            print(f"[DEBUG] Loaded config from {pretrained_name_or_path}")
+        else:
+            config = kwargs["config"]
+            print(f"[DEBUG] Using config from kwargs")
+        sys.stdout.flush()
+        
+        # Debug: print dataset_stats info
+        dataset_stats = kwargs.get("dataset_stats")
+        print(f"[DEBUG] dataset_stats is None: {dataset_stats is None}")
+        sys.stdout.flush()
+        if dataset_stats:
+            print(f"[DEBUG] dataset_stats keys: {list(dataset_stats.keys())}")
+            if "observation.state" in dataset_stats:
+                obs_mean = dataset_stats["observation.state"].get("mean")
+                print(f"[DEBUG] observation.state mean type: {type(obs_mean)}, shape: {obs_mean.shape if hasattr(obs_mean, 'shape') else 'N/A'}")
+            if "action" in dataset_stats:
+                act_mean = dataset_stats["action"].get("mean")
+                print(f"[DEBUG] action mean type: {type(act_mean)}, shape: {act_mean.shape if hasattr(act_mean, 'shape') else 'N/A'}")
+            sys.stdout.flush()
+        
         weight_paths = sorted(glob.glob(os.path.join(pretrained_name_or_path, "*.safetensors")))
-        policy = cls(kwargs["config"])
+        # Pass dataset_stats to initialize normalization buffers correctly
+        policy = cls(config, dataset_stats)
         
         # 获取当前模型的state_dict用于形状比较
         model_state_dict = policy.state_dict()

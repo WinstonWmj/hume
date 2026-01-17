@@ -53,7 +53,7 @@ pretrained_map["libero_spatial"]=/path/to/pretrained_system2
 pretrained_map["libero_object"]=/mnt/mnt/public_zgc/models/Hume-vla/Libero-Object-1
 pretrained_map["libero_goal"]=outputs/hume_s2/2025-06-08/16-38-43_hume_s2_libero_goal_no_noops_1.0.0_lerobot_ck4_gpu1_lr5e-5_bs8_s200k/checkpoints/000005/pretrained_model
 pretrained_map["libero_10"]=/path/to/pretrained_system2
-pretrained_map["behavior"]=outputs/hume_s2/2026-01-16/07-15-32_hume_s2_behavior_ck30_gpu4_lr5e-5_bs8_s800k/checkpoints/000010/pretrained_model
+pretrained_map["behavior"]=outputs/hume_s2/2026-01-16/08-04-46_hume_s2_behavior_ck30_gpu4_lr5e-5_bs8_s800k/checkpoints/020000/pretrained_model
 pretrained_dino_path=/mnt/project_rlinf/mjwei/download_models/facebook/dinov2-small
 
 data_name=behavior
@@ -79,7 +79,7 @@ actor_lr=1e-5
 temp_lr=2e-5
 
 steps=${steps:-$((GPUS * 200000))}
-save_freq=${save_freq:-10000}
+save_freq=${save_freq:-5000}
 
 # exp names
 train_args="${theta2:+--theta2=${theta2}} "\

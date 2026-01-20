@@ -288,9 +288,5 @@ class ImageTransforms(Transform):
 
     def forward(self, *inputs: Any) -> Any:
         result = self.tf(*inputs)
-        # #region agent log - Hypothesis D: check image transform output
-        import json, torch; _log_path = "/mnt/project_rlinf/mjwei/repo/hume/.cursor/debug.log"
-        if isinstance(result, torch.Tensor):
-            with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"D","location":"transforms.py:290","message":"image_transform_output","data":{"shape":list(result.shape),"max":float(result.max()),"min":float(result.min()),"nan":int(torch.isnan(result).sum()),"inf":int(torch.isinf(result).sum()),"final_resize_size":self.final_resize_size},"timestamp":int(__import__('time').time()*1000)}) + "\n")
-        # #endregion
+        
         return result

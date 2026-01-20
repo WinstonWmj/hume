@@ -287,4 +287,6 @@ class ImageTransforms(Transform):
                 self.tf = random_transforms
 
     def forward(self, *inputs: Any) -> Any:
-        return self.tf(*inputs)
+        result = self.tf(*inputs)
+        
+        return result

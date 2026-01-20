@@ -125,6 +125,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+hume-og/
 env/
 venv/
 env.bak/

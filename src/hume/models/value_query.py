@@ -1041,8 +1041,10 @@ class CalQL(PreTrainedModel):
             )
 
         if self.config.cql_importance_sample:
-            random_density = torch.log(
-                torch.tensor(0.5**action_dim, device=cql_q_samples.device)
+            # FIX: 使用 action_dim * log(0.5) 代替 log(0.5^action_dim) 避免数值下溢
+            # 当 action_dim 很大时 (如 345)，0.5^action_dim 会下溢到 0，导致 log(0) = -inf
+            random_density = action_dim * torch.log(
+                torch.tensor(0.5, device=cql_q_samples.device, dtype=cql_q_samples.dtype)
             )
 
             importance_prob = torch.cat(
@@ -1053,6 +1055,7 @@ class CalQL(PreTrainedModel):
                 ],
                 dim=1,
             )
+            
             # HACK: check dim
             cql_q_samples = cql_q_samples - importance_prob.unsqueeze(0)
         else:
@@ -1076,13 +1079,16 @@ class CalQL(PreTrainedModel):
             )
 
         """log sum exp of the ood actions"""
+        
         cql_ood_values = (
             torch.logsumexp(cql_q_samples / self.config.cql_temp, dim=-1)
             * self.config.cql_temp
         )
+        
         assert cql_ood_values.shape == (self.config.critic_ensemble_size, batch_size)
 
         cql_q_diff = cql_ood_values - q_pred
+       
         info = {
             "cql_ood_values": cql_ood_values.mean(),
         }

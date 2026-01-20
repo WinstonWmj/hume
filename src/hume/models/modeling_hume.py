@@ -1006,7 +1006,7 @@ class System2Policy(PreTrainedPolicy):
         import os
         import glob
         import safetensors
-        
+
         # Load config from the pretrained directory
         if "config" not in kwargs:
             config = cls.config_class.from_pretrained(pretrained_name_or_path)
@@ -1066,6 +1066,15 @@ class System2Policy(PreTrainedPolicy):
                 print(f"Missing keys (not in checkpoint): {incompatible_keys.missing_keys}")
             if incompatible_keys.unexpected_keys:
                 print(f"Unexpected keys (not in model): {incompatible_keys.unexpected_keys}")
+        
+        # 处理 weight tying: embed_tokens 和 lm_head 共享权重
+        # PaliGemma checkpoint 中只保存了 lm_head.weight，需要手动绑定 embed_tokens
+        if hasattr(policy.model, 'paligemma_with_expert'):
+            lm = policy.model.paligemma_with_expert.paligemma.language_model
+            if hasattr(lm, 'lm_head') and hasattr(lm.model, 'embed_tokens'):
+                if lm.lm_head.weight is not None:
+                    lm.model.embed_tokens.weight = lm.lm_head.weight
+                    print("[DEBUG] Tied embed_tokens.weight to lm_head.weight")
         
         print(f"Loading the language tokenizer from {pretrained_name_or_path} ...")
         policy.language_tokenizer = AutoTokenizer.from_pretrained(

@@ -1,0 +1,16 @@
+System2Config(n_obs_steps=1, normalization_mapping={'VISUAL': <NormalizationMode.IDENTITY: 'IDENTITY'>, 'STATE': <NormalizationMode.MEAN_STD: 'MEAN_STD'>, 'ACTION': <NormalizationMode.MEAN_STD: 'MEAN_STD'>
+}, input_features={'observation.images.rgb.left_wrist': PolicyFeature(type=<FeatureType.VISUAL: 'VISUAL'>, shape=(480,
+    480,
+    3)), 'observation.images.rgb.right_wrist': PolicyFeature(type=<FeatureType.VISUAL: 'VISUAL'>, shape=(480,
+    480,
+    3)), 'observation.images.rgb.head': PolicyFeature(type=<FeatureType.VISUAL: 'VISUAL'>, shape=(720,
+    720,
+    3)), 'observation.state': PolicyFeature(type=<FeatureType.STATE: 'STATE'>, shape=(25,))
+}, output_features={'action': PolicyFeature(type=<FeatureType.ACTION: 'ACTION'>, shape=(23,))
+}, device='cpu', use_amp=False, num_pos=3, discount=0.98, chunk_size=30, n_action_steps=30, next_obs_offset=1, s1_his_state_size=1, max_state_dim=32, max_action_dim=32, resize_imgs_with_padding=(224,
+224), empty_cameras=0, adapt_to_pi_aloha=False, use_delta_joint_actions_aloha=False, tokenizer_max_length=48, proj_width=1024, num_steps=10, use_cache=True, attention_implementation='eager', freeze_vision_encoder=True, train_expert_only=False, train_state_proj=True, optimizer_lr=5e-05, optimizer_betas=(0.9,
+0.95), optimizer_eps=1e-08, optimizer_weight_decay=1e-10, scheduler_warmup_steps=1000, scheduler_decay_steps=800000, scheduler_decay_lr=2.5e-06, paligemma_config={'bos_token_id': 2, 'eos_token_id': 1, 'hidden_size': 2048, 'ignore_index': -100, 'image_token_index': 257152, 'model_type': 'paligemma', 'pad_token_id': 0, 'projection_dim': 2048, 'text_config': {'hidden_activation': 'gelu_pytorch_tanh', 'hidden_size': 2048, 'intermediate_size': 16384, 'model_type': 'gemma', 'num_attention_heads': 8, 'num_hidden_layers': 18, 'num_image_tokens': 256, 'num_key_value_heads': 1, 'torch_dtype': 'float32', 'vocab_size': 257152
+    }, 'torch_dtype': 'float32', 'transformers_version': '4.48.1', 'vision_config': {'hidden_size': 1152, 'intermediate_size': 4304, 'model_type': 'siglip_vision_model', 'num_attention_heads': 16, 'num_hidden_layers': 27, 'num_image_tokens': 256, 'patch_size': 14, 'projection_dim': 2048, 'projector_hidden_act': 'gelu_fast', 'vision_use_head': False
+    }, 'vocab_size': 257152
+}, gemma_expert_config={'attention_bias': False, 'attention_dropout': 0.0, 'bos_token_id': 2, 'eos_token_id': 1, 'head_dim': 256, 'hidden_act': 'gelu_pytorch_tanh', 'hidden_activation': 'gelu_pytorch_tanh', 'hidden_size': 1024, 'initializer_range': 0.02, 'intermediate_size': 4096, 'max_position_embeddings': 8192, 'model_type': 'gemma', 'num_attention_heads': 8, 'num_hidden_layers': 18, 'num_key_value_heads': 1, 'pad_token_id': 0, 'rms_norm_eps': 1e-06, 'rope_theta': 10000.0, 'torch_dtype': 'float32', 'transformers_version': '4.48.1', 'use_cache': True, 'vocab_size': 257152
+})

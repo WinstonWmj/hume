@@ -12,8 +12,8 @@ fi
 NCCL_DEBUG=INFO
 
 # distributed settings
-GPUS=${GPUS:-4}
-GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+GPUS=${GPUS:-8}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NODES=$((GPUS / GPUS_PER_NODE))
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-8}
 # NOTE: Set wandb_enable=false by default to avoid blocking in multi-GPU training
@@ -22,7 +22,7 @@ PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-8}
 wandb_enable=${wandb_enable:-true}
 wandb_mode=${wandb_mode:-offline}
 num_workers=${num_workers:-0}
-save_freq=${save_freq:-10000}
+save_freq=${save_freq:-5000}
 
 # set environments
 source scripts/env.behavior.sh
@@ -75,7 +75,7 @@ accelerate launch $ACCELERATE_ARGS src/hume/training/train_s2.py \
   --steps=${steps} \
   --batch=${PER_DEVICE_BATCH_SIZE} \
   --save_freq=$save_freq \
-  --log_freq=100 \
+  --log_freq=1 \
   --job_name=${job_name} \
   --wandb.enable=${wandb_enable} \
   --wandb.mode=${wandb_mode} \

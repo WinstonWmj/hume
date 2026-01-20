@@ -234,7 +234,7 @@ def update_policy(
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
 
-
+# @parser.wrap()是 LeRobot 框架提供的配置管理机制，用于统一处理训练配置的解析和验证：它会自动从命令行参数、配置文件等来源解析并构建 TrainPipelineConfig 对象
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
@@ -304,7 +304,7 @@ def train(cfg: TrainPipelineConfig):
         logging.info(process_id + "Loading pretrained s2 ...")
 
         system2 = System2Policy.from_pretrained(
-            cfg.pretrained_s2_path, local_files_only=True
+            cfg.pretrained_s2_path, local_files_only=True, dataset_stats=dataset.meta.stats
         )
 
         policy.s2_model.load_state_dict(system2.model.state_dict())
@@ -578,5 +578,12 @@ def train(cfg: TrainPipelineConfig):
 
 
 if __name__ == "__main__":
+    # import debugpy
+    # # 5678 是监听端口，你可以随便改
+    # # wait_for_client() 会暂停程序直到你连上 Debugger，防止错过启动时的断点
+    # print("Waiting for debugger attach on port 5678...")
+    # debugpy.listen(("localhost", 5678))
+    # debugpy.wait_for_client() 
+    # print("Debugger attached!")
     init_logging()
     train()

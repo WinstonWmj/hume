@@ -4,14 +4,14 @@ if [ "$DEBUG" = true ]; then
   PER_DEVICE_BATCH_SIZE=8
   wandb_enable=false
   ACCELERATE_ARGS="--num_machines 1 --num_processes ${GPUS} --mixed_precision=bf16 --dynamo_backend=no"
-  num_workers=0
-  save_freq=5
+  num_workers=8
+  save_freq=100
   steps=2000
 fi
 
 # distributed settings
-GPUS=${GPUS:-4}
-GPUS_PER_NODE=${GPUS_PER_NODE:-4}
+GPUS=${GPUS:-8}
+GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NODES=$((GPUS / GPUS_PER_NODE))
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-8}
 wandb_enable=${wandb_enable:-true}
@@ -53,7 +53,7 @@ pretrained_map["libero_spatial"]=/path/to/pretrained_system2
 pretrained_map["libero_object"]=/mnt/mnt/public_zgc/models/Hume-vla/Libero-Object-1
 pretrained_map["libero_goal"]=outputs/hume_s2/2025-06-08/16-38-43_hume_s2_libero_goal_no_noops_1.0.0_lerobot_ck4_gpu1_lr5e-5_bs8_s200k/checkpoints/000005/pretrained_model
 pretrained_map["libero_10"]=/path/to/pretrained_system2
-pretrained_map["behavior"]=outputs/hume_s2/2026-01-16/08-04-46_hume_s2_behavior_ck30_gpu4_lr5e-5_bs8_s800k/checkpoints/020000/pretrained_model
+pretrained_map["behavior"]=outputs/hume_s2/2026-01-20/12-22-10_hume_s2_behavior_ck30_gpu8_lr5e-5_bs8_s1600k/checkpoints/005000/pretrained_model
 pretrained_dino_path=/mnt/project_rlinf/mjwei/download_models/facebook/dinov2-small
 
 data_name=behavior
@@ -104,7 +104,7 @@ echo "pretrained_s2_path: ${pretrained_s2_path}"
 # Launch training
 echo "train_args: ${train_args}"
 echo "job_name: ${job_name}"
-accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${train_args} \
+CMD="accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${train_args} \
   --pretrained_s2_path=${pretrained_s2_path} \
   --policy.type=hume \
   --pretrained_dino_path=${pretrained_dino_path} \
@@ -133,3 +133,11 @@ accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${train_arg
   --temp_lr=${temp_lr} \
   --checkpoints_total_limit=0 \
   --s1_his_state_size=${s1_his_state_size}
+"
+export REPO_PATH=$(dirname "$(dirname "${BASH_SOURCE[0]}")")
+LOG_DIR="${REPO_PATH}/outputs/logs/$(date +'%Y%m%d-%H:%M:%S')-${job_name}" #/$(date +'%Y%m%d-%H:%M:%S')"
+mkdir -p "${LOG_DIR}"
+MEGA_LOG_FILE="${LOG_DIR}/run_vqh_s1.log"
+echo MEGA_LOG_FILE: ${MEGA_LOG_FILE}
+echo ${CMD} > ${MEGA_LOG_FILE}
+${CMD} 2>&1 | tee -a ${MEGA_LOG_FILE}

@@ -437,5 +437,12 @@ def train(cfg: TrainPipelineConfig):
 
 
 if __name__ == "__main__":
+    # import debugpy
+    # # 5678 是监听端口，你可以随便改
+    # # wait_for_client() 会暂停程序直到你连上 Debugger，防止错过启动时的断点
+    # print("Waiting for debugger attach on port 5678...")
+    # debugpy.listen(("localhost", 5678))
+    # debugpy.wait_for_client() 
+    # print("Debugger attached!")
     init_logging()
     train()

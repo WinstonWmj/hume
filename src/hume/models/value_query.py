@@ -951,6 +951,11 @@ class CalQL(PreTrainedModel):
         It is needed for both critic_loss_fn and cql_alpha_loss_fn
         """
         batch_size = batch["rewards"].shape[0]
+        # #region agent log - Hypothesis C: check encoded_observations for nan/inf
+        import json; _log_path = "/mnt/project_rlinf/mjwei/repo/hume/.cursor/debug.log"
+        _enc_obs = batch["encoded_observations"]; _enc_next = batch["encoded_next_observations"]
+        with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"C","location":"value_query.py:955","message":"encoded_obs_check","data":{"enc_obs_max":float(_enc_obs.max()),"enc_obs_min":float(_enc_obs.min()),"enc_obs_nan":int(torch.isnan(_enc_obs).sum()),"enc_obs_inf":int(torch.isinf(_enc_obs).sum()),"enc_next_max":float(_enc_next.max()),"enc_next_min":float(_enc_next.min()),"enc_next_nan":int(torch.isnan(_enc_next).sum()),"enc_next_inf":int(torch.isinf(_enc_next).sum())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+        # #endregion
 
         q_pred = self.critics.forward(batch["encoded_observations"], batch["actions"])
         # HACK: shape changed from jax implementation
@@ -985,6 +990,10 @@ class CalQL(PreTrainedModel):
             batch["encoded_next_observations"],
             repeat=self.config.cql_n_actions,
         )
+        # #region agent log - Hypothesis B: check log_pis for nan/inf
+        import json; _log_path = "/mnt/project_rlinf/mjwei/repo/hume/.cursor/debug.log"
+        with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"B","location":"value_query.py:988","message":"log_pis_check","data":{"current_log_pis_max":float(cql_current_log_pis.max()),"current_log_pis_min":float(cql_current_log_pis.min()),"current_log_pis_nan":int(torch.isnan(cql_current_log_pis).sum()),"current_log_pis_inf":int(torch.isinf(cql_current_log_pis).sum()),"next_log_pis_max":float(cql_next_log_pis.max()),"next_log_pis_min":float(cql_next_log_pis.min()),"next_log_pis_nan":int(torch.isnan(cql_next_log_pis).sum()),"next_log_pis_inf":int(torch.isinf(cql_next_log_pis).sum())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+        # #endregion
 
         all_sampled_actions = torch.cat(
             [
@@ -1041,8 +1050,10 @@ class CalQL(PreTrainedModel):
             )
 
         if self.config.cql_importance_sample:
-            random_density = torch.log(
-                torch.tensor(0.5**action_dim, device=cql_q_samples.device)
+            # FIX: 使用 action_dim * log(0.5) 代替 log(0.5^action_dim) 避免数值下溢
+            # 当 action_dim 很大时 (如 345)，0.5^action_dim 会下溢到 0，导致 log(0) = -inf
+            random_density = action_dim * torch.log(
+                torch.tensor(0.5, device=cql_q_samples.device, dtype=cql_q_samples.dtype)
             )
 
             importance_prob = torch.cat(
@@ -1053,6 +1064,9 @@ class CalQL(PreTrainedModel):
                 ],
                 dim=1,
             )
+            # #region agent log - Hypothesis B: check importance_prob before subtraction
+            with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"B","location":"value_query.py:1066","message":"importance_prob_check","data":{"importance_prob_max":float(importance_prob.max()),"importance_prob_min":float(importance_prob.min()),"importance_prob_nan":int(torch.isnan(importance_prob).sum()),"importance_prob_inf":int(torch.isinf(importance_prob).sum()),"cql_q_samples_before_max":float(cql_q_samples.max()),"cql_q_samples_before_min":float(cql_q_samples.min())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+            # #endregion
             # HACK: check dim
             cql_q_samples = cql_q_samples - importance_prob.unsqueeze(0)
         else:
@@ -1076,13 +1090,24 @@ class CalQL(PreTrainedModel):
             )
 
         """log sum exp of the ood actions"""
+        # #region agent log - Hypothesis A,E: check cql_q_samples before logsumexp
+        import json; _log_path = "/mnt/project_rlinf/mjwei/repo/hume/.cursor/debug.log"
+        _scaled = cql_q_samples / self.config.cql_temp
+        with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"A,E","location":"value_query.py:1079","message":"before_logsumexp","data":{"cql_temp":float(self.config.cql_temp),"cql_q_samples_max":float(cql_q_samples.max()),"cql_q_samples_min":float(cql_q_samples.min()),"cql_q_samples_nan":int(torch.isnan(cql_q_samples).sum()),"cql_q_samples_inf":int(torch.isinf(cql_q_samples).sum()),"scaled_max":float(_scaled.max()),"scaled_min":float(_scaled.min()),"scaled_nan":int(torch.isnan(_scaled).sum()),"scaled_inf":int(torch.isinf(_scaled).sum())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+        # #endregion
         cql_ood_values = (
             torch.logsumexp(cql_q_samples / self.config.cql_temp, dim=-1)
             * self.config.cql_temp
         )
+        # #region agent log - Hypothesis A: check cql_ood_values after logsumexp
+        with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"A","location":"value_query.py:1082","message":"after_logsumexp","data":{"cql_ood_values_max":float(cql_ood_values.max()),"cql_ood_values_min":float(cql_ood_values.min()),"cql_ood_values_nan":int(torch.isnan(cql_ood_values).sum()),"cql_ood_values_inf":int(torch.isinf(cql_ood_values).sum())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+        # #endregion
         assert cql_ood_values.shape == (self.config.critic_ensemble_size, batch_size)
 
         cql_q_diff = cql_ood_values - q_pred
+        # #region agent log - Hypothesis A: check q_pred and cql_q_diff
+        with open(_log_path, "a") as _f: _f.write(json.dumps({"hypothesisId":"A","location":"value_query.py:1097","message":"q_pred_and_diff","data":{"q_pred_max":float(q_pred.max()),"q_pred_min":float(q_pred.min()),"q_pred_nan":int(torch.isnan(q_pred).sum()),"q_pred_inf":int(torch.isinf(q_pred).sum()),"cql_q_diff_max":float(cql_q_diff.max()),"cql_q_diff_min":float(cql_q_diff.min()),"cql_q_diff_nan":int(torch.isnan(cql_q_diff).sum()),"cql_q_diff_inf":int(torch.isinf(cql_q_diff).sum())},"timestamp":int(__import__('time').time()*1000)}) + "\n")
+        # #endregion
         info = {
             "cql_ood_values": cql_ood_values.mean(),
         }

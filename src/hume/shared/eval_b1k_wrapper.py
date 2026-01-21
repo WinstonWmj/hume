@@ -13,6 +13,16 @@ logger = logging.getLogger("policy")
 logger.setLevel(20)  # info
 
 RESIZE_SIZE = 224
+
+# State indices for BEHAVIOR dataset: select 25 dims from 256 proprio
+BEHAVIOR_STATE_INDICES = [
+    *range(253, 256),   # base_qvel: 3
+    *range(236, 240),   # trunk_qpos: 4
+    *range(158, 165),   # arm_left_qpos: 7
+    *range(193, 195),   # gripper_left_qpos: 2
+    *range(197, 204),   # arm_right_qpos: 7
+    *range(232, 234),   # gripper_right_qpos: 2
+]  # Total: 25 dimensions
 DESPTH_RESIZE_SIZE = 720
 
 SKILL_PROMPT = """
@@ -47,7 +57,7 @@ class B1KPolicyWrapper:
 
         self.control_mode = control_mode
         self.action_queue = deque(maxlen=action_horizon)
-        self.last_action = {"actions": np.zeros((action_horizon, 23), dtype=np.float64)}
+        self.last_action = np.zeros((1, 23), dtype=np.float64)  # (batch, action_dim)
         self.action_horizon = action_horizon
 
         self.replan_interval = action_horizon  # K: replan every 10 steps
@@ -81,7 +91,7 @@ class B1KPolicyWrapper:
 
     def reset(self):
         self.action_queue = deque(maxlen=self.action_horizon)
-        self.last_action = {"actions": np.zeros((self.action_horizon, 23), dtype=np.float64)}
+        self.last_action = np.zeros((1, 23), dtype=np.float64)  # (batch, action_dim)
         self.step_counter = 0
         if self.reasoner:
             self.reasoner.reset()
@@ -90,7 +100,8 @@ class B1KPolicyWrapper:
         """
         Process the observation dictionary to match the expected input format for the model.
         """
-        prop_state = obs["robot_r1::proprio"][None]
+        # Select 25 dims from 256 proprio to match model's expected input
+        prop_state = obs["robot_r1::proprio"][BEHAVIOR_STATE_INDICES][None]
         img_obs = np.stack(
             [
                 resize_with_pad(
@@ -112,20 +123,20 @@ class B1KPolicyWrapper:
             axis=1,
         )
 
-        if "robot_r1::robot_r1:right_realsense_link:Camera:0::instance_seg" in obs:
-            pass  # TODO: add instance segmentation
+        # if "robot_r1::robot_r1:right_realsense_link:Camera:0::instance_seg" in obs:
+        #     pass  # TODO: add instance segmentation
 
         processed_obs = {
-            "observation": img_obs,  # Shape: (1, 3, H, W, C)
+            "observation": img_obs,  # Shape: (1, num_cameras=3, H, W, C)
             "proprio": prop_state,
         }
 
-        if "robot_r1::robot_r1:zed_link:Camera:0::depth_linear" in obs:
-            depth_obs = obs["robot_r1::robot_r1:zed_link:Camera:0::depth_linear"]
-            depth_obs = cv2.resize(
-                depth_obs, (DESPTH_RESIZE_SIZE, DESPTH_RESIZE_SIZE), interpolation=cv2.INTER_LINEAR
-            )
-            processed_obs["observation/egocentric_depth"] = depth_obs[None]
+        # if "robot_r1::robot_r1:zed_link:Camera:0::depth_linear" in obs:
+        #     depth_obs = obs["robot_r1::robot_r1:zed_link:Camera:0::depth_linear"]
+        #     depth_obs = cv2.resize(
+        #         depth_obs, (DESPTH_RESIZE_SIZE, DESPTH_RESIZE_SIZE), interpolation=cv2.INTER_LINEAR
+        #     )
+        #     processed_obs["observation/egocentric_depth"] = depth_obs[None]
 
         # if "robot_r1::robot_r1:left_realsense_link:Camera:0::depth_linear" in obs:
         #     depth_obs = obs["robot_r1::robot_r1:left_realsense_link:Camera:0::depth_linear"][None]
@@ -152,8 +163,8 @@ class B1KPolicyWrapper:
                 "observation/egocentric_camera": nbatch["observation"][0, 0],
                 "observation/wrist_image_left": nbatch["observation"][0, 1],
                 "observation/wrist_image_right": nbatch["observation"][0, 2],
-                "observation/state": joint_positions,
-                "prompt": self.task_prompt,
+                "observation.state": joint_positions,
+                "task": self.task_prompt,
             }
 
             if self.fine_grained_level > 0:
@@ -162,13 +173,13 @@ class B1KPolicyWrapper:
                     multi_modals=[batch["observation/egocentric_camera"]],
                 )
                 logger.info(f"* {reasoner_response}")
-                batch["prompt"] = reasoner_response
+                batch["task"] = reasoner_response
 
             if "observation/egocentric_depth" in nbatch:
                 batch["observation/egocentric_depth"] = nbatch["observation/egocentric_depth"][0]
 
             try:
-                action = self.policy.infer(batch)
+                action = self.policy.infer(batch)  # returns np.ndarray of shape (batch, action_dim)
                 self.last_action = action
             except Exception as e:
                 action = self.last_action
@@ -176,7 +187,7 @@ class B1KPolicyWrapper:
                     f"Error in action prediction at step {self.step_counter}, {joint_positions.shape=}, using last action: {e}"
                 )
 
-            target_joint_positions = action["actions"].copy()
+            target_joint_positions = action.copy()
 
             # Add this sequence to action queue
             new_seq = deque([a for a in target_joint_positions[: self.max_len]])
@@ -234,9 +245,9 @@ class B1KPolicyWrapper:
             📌 Key: observation/joint_position
             Type: ndarray
             Dtype: float64
-            Shape: (16,)
+            Shape: (B, 16,)  # mjwei NOTE: 16 -> 25??
 
-            📌 Key: prompt
+            📌 Key: task # which is prompt
             Type: str
             Value: do something
 
@@ -244,18 +255,18 @@ class B1KPolicyWrapper:
             📌 Key: actions
             Type: ndarray
             Dtype: float64
-            Shape: (10, 16)
+            Shape: (batch, 15)
         """
-        input_obs = self.process_obs(input_obs)
         if self.control_mode == "receeding_temporal":
             return self.act_receeding_temporal(input_obs)
 
         if self.control_mode == "receeding_horizon":
             if len(self.action_queue) > 0:
                 # pop the first action in the queue
-                final_action = self.action_queue.popleft()[None]
+                final_action = self.action_queue.popleft()
                 return torch.from_numpy(final_action)
 
+        input_obs = self.process_obs(input_obs)
         nbatch = copy.deepcopy(input_obs)
         if nbatch["observation"].shape[-1] != 3:
             # make B, num_cameras, H, W, C  from B, num_cameras, C, H, W
@@ -263,13 +274,13 @@ class B1KPolicyWrapper:
             nbatch["observation"] = np.transpose(nbatch["observation"], (0, 1, 3, 4, 2))
 
         # nbatch["proprio"] is B, 16, where B=1
-        joint_positions = nbatch["proprio"][0]
+        joint_positions = nbatch["proprio"]  # shape (1, 25)
         batch = {
-            "observation/egocentric_camera": nbatch["observation"][0, 0],
-            "observation/wrist_image_left": nbatch["observation"][0, 1],
-            "observation/wrist_image_right": nbatch["observation"][0, 2],
-            "observation/state": joint_positions,
-            "prompt": self.task_prompt,
+            "observation.images.rgb.head": nbatch["observation"][:, 0],  # shape (batch=1, H, W, 3)
+            "observation.images.rgb.left_wrist": nbatch["observation"][:, 1],  # shape (batch=1, H, W, 3)
+            "observation.images.rgb.right_wrist": nbatch["observation"][:, 2],  # shape (batch=1, H, W, 3)
+            "observation.state": joint_positions,  # shape (batch=1, 25)
+            "task": np.array([self.task_prompt]),  # str (batch=1,)
         }
 
         if "observation/egocentric_depth" in nbatch:
@@ -285,18 +296,17 @@ class B1KPolicyWrapper:
             batch["prompt"] = reasoner_response
 
         try:
-            action = self.policy.infer(batch)
+            action = self.policy.infer(batch)  # returns np.ndarray of shape (batch, action_dim)
             self.last_action = action
         except Exception as e:
             action = self.last_action
             raise e
         # convert to absolute action and append gripper command
-        # action shape: (10, 23), joint_positions shape: (23,)
-        # Need to broadcast joint_positions to match action sequence length
-        target_joint_positions = action["actions"].copy()
+        # action shape: (self.max_len, batch, action_dim), e.g. (self.max_len, 1, 23)
+        target_joint_positions = action.copy()
         if self.control_mode == "receeding_horizon":
-            self.action_queue = deque([a for a in target_joint_positions[: self.max_len]])
-            final_action = self.action_queue.popleft()[None]
+            self.action_queue = deque([a for a in target_joint_positions[: self.max_len, :]])
+            final_action = self.action_queue.popleft()
 
         # # temporal emsemble start
         elif self.control_mode == "temporal_ensemble":

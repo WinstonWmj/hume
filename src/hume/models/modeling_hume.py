@@ -286,14 +286,11 @@ class HumePolicy(PreTrainedPolicy):
             self.history_state.extend(
                 np.expand_dims(observation["observation.state"], 1)
                 .repeat(self.config.s1_his_state_size, axis=1)
-                .transpose(1, 0, 2)
-            )
+            )  # shape (1, s1_his_state_size, 25)
         else:
             self.history_state.append(observation["observation.state"])
 
-        observation["observation.state"] = np.asarray(self.history_state).transpose(
-            1, 0, 2
-        )
+        observation["observation.state"] = np.asarray(self.history_state).transpose(1, 0, 2)  # shape (s1_his_state_size, 1, 25)
 
         observation: dict[str, torch.tensor | list[str]] = {
             **{
@@ -304,69 +301,68 @@ class HumePolicy(PreTrainedPolicy):
                 for k, v in observation.items()
                 if k
                 in {
-                    "observation.images.image",
-                    "observation.images.wrist_image",
-                    "observation.images.image_0",
+                    "observation.images.rgb.head",
+                    "observation.images.rgb.left_wrist",
+                    "observation.images.rgb.right_wrist",
                 }
             },
-            **{k: v for k, v in observation.items() if k in {"task"}},  # len = batch
+            **{k: v for k, v in observation.items() if k in {"task"}},  # shape (1,)  # prepare_language中会处理
             **{
                 k: torch.tensor(v)
                 .to(self.infer_cfg.device)
-                .float()  # b, state_horizon, state_dim
+                .float()  # state_horizon, state_dim
                 for k, v in observation.items()
                 if k in {"observation.state"}
             },
         }
         batch_size = len(observation["task"])
 
-        if not self.action_plan:
-            # Finished executing previous action chunk -- compute new chunk
-            # Prepare observations dict
-            # infer the action
-            if self.infer_step % self.infer_cfg.s2_replan_steps == 0:
-                self.outputs = {}  # infer with s1 or s2
-            stamp = (
-                torch.tensor(
-                    [
-                        self.infer_step
-                        % self.infer_cfg.s2_replan_steps
-                        / self.config.s2_chunk_size
-                    ]
-                )
-                .expand(batch_size)
-                .to(self.infer_cfg.device)
-                .float()
+        # Finished executing previous action chunk -- compute new chunk
+        # Prepare observations dict
+        # infer the action
+        if self.infer_step % self.infer_cfg.s2_replan_steps == 0:
+            self.outputs = {}  # infer with s1 or s2
+        stamp = (
+            torch.tensor(
+                [
+                    self.infer_step
+                    % self.infer_cfg.s2_replan_steps
+                    / self.config.s2_chunk_size
+                ]
             )
-            self.outputs = self.select_action(
-                observation,
-                self.outputs,
-                stamp,
-                s2_candidates_num=self.infer_cfg.s2_candidates_num,
-                noise_temp_bounds=(
-                    self.infer_cfg.noise_temp_lower_bound,
-                    self.infer_cfg.noise_temp_upper_bound,
-                ),
-                time_temp_bounds=(
-                    self.infer_cfg.time_temp_lower_bound,
-                    self.infer_cfg.time_temp_upper_bound,
-                ),
-            )
-            action_chunk = self.outputs["s1_action"].cpu().numpy()
+            .expand(batch_size)
+            .to(self.infer_cfg.device)
+            .float()
+        )
+        self.outputs = self.select_action(
+            observation,
+            self.outputs,
+            stamp,
+            s2_candidates_num=self.infer_cfg.s2_candidates_num,
+            noise_temp_bounds=(
+                self.infer_cfg.noise_temp_lower_bound,
+                self.infer_cfg.noise_temp_upper_bound,
+            ),
+            time_temp_bounds=(
+                self.infer_cfg.time_temp_lower_bound,
+                self.infer_cfg.time_temp_upper_bound,
+            ),
+        )
+        action_chunk = self.outputs["s1_action"].cpu().numpy()
 
-            if self.infer_cfg.post_process_action:
-                action_chunk[..., -1] = 2 * (1 - action_chunk[..., -1]) - 1
+        if self.infer_cfg.post_process_action:
+            action_chunk[..., -1] = 2 * (1 - action_chunk[..., -1]) - 1
 
-            # convert action chunk shape to (replan_steps, batch, action_dim)
-            action_chunk = action_chunk.transpose(1, 0, 2)
-            assert len(action_chunk) >= self.infer_cfg.replan_steps, (
-                f"We want to replan every {self.infer_cfg.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-            )
-            self.action_plan.extend(action_chunk[: self.infer_cfg.replan_steps])
+        # convert action chunk shape to (replan_steps, batch, action_dim)
+        action_chunk = action_chunk.transpose(1, 0, 2)  # shape (replan_steps, batch, action_dim)
+        assert len(action_chunk) >= self.infer_cfg.replan_steps, (
+            f"We want to replan every {self.infer_cfg.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+        )
+        # self.action_plan.extend(action_chunk[: self.infer_cfg.replan_steps])
 
-        self.infer_step += 1
-        action = self.action_plan.popleft()
-        return np.asarray(action)
+        # self.infer_step += 1
+        # action = self.action_plan.popleft()
+        return np.asarray(action_chunk)
 
     @torch.no_grad
     @jaxtyped(typechecker=typechecker)
@@ -427,7 +423,7 @@ class HumePolicy(PreTrainedPolicy):
             ]
             action_index, q_values = self.value_query_head.select_q_actions(
                 images, img_masks, lang_tokens, lang_masks, noise_actions_wo_pad
-            )
+            )  # action_index's shape = (1,), q_values's shape = (1, s2_candidates_num)
             self.q_value_cache.append(q_values.squeeze())
             unnormalized_noise_actions = self.unnormalize_outputs(
                 {"action": noise_actions_wo_pad}
@@ -437,12 +433,12 @@ class HumePolicy(PreTrainedPolicy):
 
             outputs = {"noise_action": selected_noise_action}
 
-        noise_action: Float[Tensor, "batch s2_chunksize action_dim"] = outputs[
+        noise_action: Float[Tensor, "(batchsize, s2_chunksize action_dim)"] = outputs[
             "noise_action"
         ]
         idcs = (stamp * self.config.s2_chunk_size).long().unsqueeze(1) + torch.arange(
             self.config.s1_chunk_size, device=noise_action.device
-        )
+        )  # shape (1, s1_chunk_size)
         batch_idcs = torch.arange(
             noise_action.shape[0], device=noise_action.device
         ).unsqueeze(1)
@@ -1164,13 +1160,13 @@ class System2(nn.Module):
             bsize, num_img_embs = img_emb.shape[:2]
             img_mask = img_mask[:, None].expand(bsize, num_img_embs)
 
-            embs.append(img_emb)
+            embs.append(img_emb)  # 1, 256, 2048
             pad_masks.append(img_mask)
 
             # Create attention masks so that image tokens attend to each other
             att_masks += [0] * num_img_embs
 
-        lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
+        lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)  # shape (batch, seq_len, hidden_size)
 
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
@@ -1183,7 +1179,7 @@ class System2(nn.Module):
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
 
-        embs = torch.cat(embs, dim=1)
+        embs = torch.cat(embs, dim=1)  # shape (batch, 256*3+48 = 816, 2048)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))

@@ -170,7 +170,12 @@ class PaliGemmaWithExpertModel(nn.Module):
                 gates = []
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
-                    hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
+                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
+                    if adarms_cond is not None and adarms_cond[i] is not None:
+                        hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
+                    else:
+                        hidden_states = layer.input_layernorm(hidden_states)
+                        gate = None
                     gates.append(gate)
 
                     input_shape = hidden_states.shape[:-1]
@@ -223,14 +228,27 @@ class PaliGemmaWithExpertModel(nn.Module):
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
                     out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
 
-                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
+                    # Support both standard HuggingFace (no gate) and modified version (with gate)
+                    if gates[i] is not None:
+                        out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
+                    else:
+                        out_emb = hidden_states + out_emb  # Standard residual connection
                     after_first_residual = out_emb.clone()
-                    out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
+                    if adarms_cond is not None and adarms_cond[i] is not None:
+                        out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+                    else:
+                        out_emb = layer.post_attention_layernorm(out_emb)
+                        gate = None
                     if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
                         out_emb = out_emb.to(dtype=torch.bfloat16)
 
                     out_emb = layer.mlp(out_emb)
-                    out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
+                    # Support both standard HuggingFace (no gate) and modified version (with gate)
+                    if gate is not None:
+                        out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
+                    else:
+                        out_emb = after_first_residual + out_emb  # Standard residual connection
                     outputs_embeds.append(out_emb)
                     start_pos = end_pos
 
@@ -256,7 +274,11 @@ class PaliGemmaWithExpertModel(nn.Module):
             def compute_final_norms(inputs_embeds, adarms_cond):
                 outputs_embeds = []
                 for i, hidden_states in enumerate(inputs_embeds):
-                    out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
+                    if adarms_cond is not None and adarms_cond[i] is not None:
+                        out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
+                    else:
+                        out_emb = models[i].norm(hidden_states)
                     outputs_embeds.append(out_emb)
                 return outputs_embeds
 

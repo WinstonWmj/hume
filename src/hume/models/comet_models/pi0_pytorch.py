@@ -344,19 +344,6 @@ class PI0Pytorch(nn.Module):
             noise = self.sample_noise(actions_shape, device)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
-
-        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
-        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
-
-        _, past_key_values = self.paligemma_with_expert.forward(
-            attention_mask=prefix_att_2d_masks_4d,
-            position_ids=prefix_position_ids,
-            past_key_values=None,
-            inputs_embeds=[prefix_embs, None],
-            use_cache=True,
-        )
 
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
@@ -366,10 +353,13 @@ class PI0Pytorch(nn.Module):
         time = torch.tensor(time_temp, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
-            v_t = self.denoise_step(
+            # Use full prefix+suffix processing to avoid HuggingFace KV cache issues
+            # This uses the 'else' branch in forward() which manually iterates through layers
+            v_t = self.denoise_step_no_cache(
                 state,
+                prefix_embs,
                 prefix_pad_masks,
-                past_key_values,
+                prefix_att_masks,
                 x_t,
                 expanded_time,
             )
@@ -386,7 +376,7 @@ class PI0Pytorch(nn.Module):
         x_t,
         timestep,
     ):
-        """Apply one denoising step."""
+        """Apply one denoising step using KV cache (for environments with modified Transformers)."""
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
 
         suffix_len = suffix_pad_masks.shape[1]
@@ -413,6 +403,67 @@ class PI0Pytorch(nn.Module):
         )
 
         suffix_out = outputs_embeds[1]
+        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        suffix_out = suffix_out.to(dtype=torch.float32)
+        return self.action_out_proj(suffix_out)
+
+    def denoise_step_no_cache(
+        self,
+        state,
+        prefix_embs,
+        prefix_pad_masks,
+        prefix_att_masks,
+        x_t,
+        timestep,
+    ):
+        """Apply one denoising step without KV cache.
+        
+        This processes full prefix+suffix together, using the 'else' branch in 
+        PaliGemmaWithExpertModel.forward() which manually iterates through layers.
+        This avoids HuggingFace's _update_causal_mask issues with standard Transformers.
+        """
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
+
+        batch_size = prefix_pad_masks.shape[0]
+        prefix_len = prefix_pad_masks.shape[1]
+        suffix_len = suffix_pad_masks.shape[1]
+
+        # Create full attention mask for prefix + suffix
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
+        
+        # Suffix can attend to prefix (bidirectional) and itself (causal)
+        prefix_pad_2d_masks_for_suffix = prefix_pad_masks[:, None, :].expand(batch_size, suffix_len, prefix_len)
+        
+        # Combine masks: [prefix_to_prefix, prefix_to_suffix (zeros); suffix_to_prefix, suffix_to_suffix]
+        # Top row: prefix attends to prefix (bidirectional), prefix doesn't attend to suffix (zeros)
+        top_row = torch.cat([
+            prefix_att_2d_masks,
+            torch.zeros(batch_size, prefix_len, suffix_len, dtype=torch.bool, device=prefix_embs.device)
+        ], dim=2)
+        # Bottom row: suffix attends to prefix (bidirectional), suffix attends to suffix (causal)
+        bottom_row = torch.cat([prefix_pad_2d_masks_for_suffix, suffix_att_2d_masks], dim=2)
+        full_att_2d_masks = torch.cat([top_row, bottom_row], dim=1)
+
+        # Position IDs: prefix positions followed by suffix positions
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
+        suffix_position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
+        position_ids = torch.cat([prefix_position_ids, suffix_position_ids], dim=1)
+
+        full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+
+        # Use else branch: both prefix_embs and suffix_embs are provided, no KV cache
+        # Pass adarms_cond=[None, None] to use standard HuggingFace without cond param
+        (prefix_out, suffix_out), _ = self.paligemma_with_expert.forward(
+            attention_mask=full_att_2d_masks_4d,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=False,
+            adarms_cond=[None, None],  # Use None to be compatible with standard HuggingFace
+        )
+
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)

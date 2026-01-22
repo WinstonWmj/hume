@@ -178,6 +178,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                         gate = None
                     gates.append(gate)
 
+                    # Convert to bfloat16 if the layer uses bfloat16 weights
+                    if layer.self_attn.q_proj.weight.dtype == torch.bfloat16:
+                        hidden_states = hidden_states.to(dtype=torch.bfloat16)
+
                     input_shape = hidden_states.shape[:-1]
                     hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
                     query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)

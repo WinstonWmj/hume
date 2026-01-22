@@ -41,7 +41,7 @@ from torch.optim import Optimizer
 from tqdm.auto import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer
 
-from hume.models.modeling_hume import HumePolicy, System2Policy
+from hume.models.modeling_hume import HumePolicy, System2Policy, CometPolicy
 from hume.training.lerobot_patch import (
     make_dataset,
     make_optimizer_and_scheduler,
@@ -102,6 +102,10 @@ class TrainPipelineConfig(LeroBotTrainPipelineConfig):
     s1_his_state_size: int = 1
     cache_s2_actions: bool = False
 
+    # comet policy settings
+    pretrained_comet_path: str = None
+    freeze_pi0: bool = True
+
     # # wandb
     # wandb: WandBConfig = field(default_factory=WandBConfig(entity="qudelin-org"))
 
@@ -142,6 +146,12 @@ class TrainPipelineConfig(LeroBotTrainPipelineConfig):
         self.policy.next_obs_offset = self.next_obs_offset
         self.policy.s1_his_state_size = self.s1_his_state_size
         self.policy.cache_s2_actions = self.cache_s2_actions
+
+        # comet policy specific settings
+        if hasattr(self.policy, 'freeze_pi0'):
+            self.policy.freeze_pi0 = self.freeze_pi0
+        if self.pretrained_comet_path:
+            self.policy.comet_weight_path = self.pretrained_comet_path
 
         if not self.resume:
             now = dt.datetime.now()
@@ -294,55 +304,111 @@ def train(cfg: TrainPipelineConfig):
         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size)
 
     logging.info(process_id + "Creating policy")
+    
+    # Determine policy class based on policy type
+    policy_type = getattr(cfg.policy, 'type', 'hume')
+    if policy_type == 'comet':
+        logging.info(process_id + colored("Using CometPolicy", "cyan", attrs=["bold"]))
+        policy_cls = CometPolicy
+    else:
+        logging.info(process_id + colored("Using HumePolicy", "cyan", attrs=["bold"]))
+        policy_cls = HumePolicy
+    
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
-        policy_cls=HumePolicy,
+        policy_cls=policy_cls,
     )
 
-    if cfg.pretrained_s2_path:
-        logging.info(process_id + "Loading pretrained s2 ...")
-
-        system2 = System2Policy.from_pretrained(
-            cfg.pretrained_s2_path, local_files_only=True, dataset_stats=dataset.meta.stats
-        )
-
-        policy.s2_model.load_state_dict(system2.model.state_dict())
-        policy.s2_model.to(device)
+    # Load pretrained weights based on policy type
+    if policy_type == 'comet' and cfg.pretrained_comet_path:
+        logging.info(process_id + "Loading pretrained comet weights into PI0 model ...")
+        import glob
+        import os
+        import safetensors
+        
+        weight_paths = sorted(glob.glob(os.path.join(cfg.pretrained_comet_path, "*.safetensors")))
+        pi0_state_dict = policy.pi0_model.state_dict()
+        
+        loaded_count = 0
+        for weight_path in weight_paths:
+            checkpoint_state_dict = safetensors.torch.load_file(weight_path)
+            
+            filtered_state_dict = {}
+            for key, value in checkpoint_state_dict.items():
+                if key in pi0_state_dict:
+                    if value.shape == pi0_state_dict[key].shape:
+                        filtered_state_dict[key] = value
+                        loaded_count += 1
+            
+            if filtered_state_dict:
+                policy.pi0_model.load_state_dict(filtered_state_dict, strict=False)
+        
+        logging.info(process_id + f"Loaded {loaded_count} weights into PI0 model")
+        policy.pi0_model.to(device)
+        
+        # Load tokenizer
         policy.language_tokenizer = AutoTokenizer.from_pretrained(
-            cfg.pretrained_s2_path
+            cfg.pretrained_comet_path, trust_remote_code=True
         )
+        
+        # Freeze PI0 if configured
+        if cfg.freeze_pi0:
+            policy._set_requires_grad()
+            logging.info(process_id + "PI0 model frozen")
+    
+    elif policy_type != 'comet':
+        # Original HumePolicy loading logic
+        if cfg.pretrained_s2_path:
+            logging.info(process_id + "Loading pretrained s2 ...")
 
-    if cfg.pretrained_paligemma_path:
-        logging.info(process_id + "Loading pretrained paligemma ...")
-        policy.config.paligemma_config = AutoConfig.from_pretrained(
-            cfg.pretrained_paligemma_path
-        ).to_dict()
-        policy.s2_model.paligemma_with_expert.paligemma = AutoModel.from_pretrained(
-            cfg.pretrained_paligemma_path, device_map=device
-        )
-        policy.language_tokenizer = AutoTokenizer.from_pretrained(
-            cfg.pretrained_paligemma_path
-        )
-        # post init
-        policy.s2_model.paligemma_with_expert.to_bfloat16_like_physical_intelligence()
-        policy.s2_model.paligemma_with_expert.set_requires_grad()
+            system2 = System2Policy.from_pretrained(
+                cfg.pretrained_s2_path, local_files_only=True, dataset_stats=dataset.meta.stats
+            )
 
-    if cfg.pretrained_dino_path:
-        logging.info(process_id + "Loading pretrained dino ...")
-        policy.config.s1_dino_config = AutoConfig.from_pretrained(
-            cfg.pretrained_dino_path
-        ).to_dict()
-        policy.s1_model.fast_visuo_expert.vision_tower = AutoModel.from_pretrained(
-            cfg.pretrained_dino_path, device_map=device
-        )
-        policy.s1_model.fast_visuo_expert.to_bfloat16_like_physical_intelligence()
-        policy.s1_model.fast_visuo_expert.set_requires_grad()
+            policy.s2_model.load_state_dict(system2.model.state_dict())
+            policy.s2_model.to(device)
+            policy.language_tokenizer = AutoTokenizer.from_pretrained(
+                cfg.pretrained_s2_path, trust_remote_code=True
+            )
+
+        if cfg.pretrained_paligemma_path:
+            logging.info(process_id + "Loading pretrained paligemma ...")
+            policy.config.paligemma_config = AutoConfig.from_pretrained(
+                cfg.pretrained_paligemma_path
+            ).to_dict()
+            policy.s2_model.paligemma_with_expert.paligemma = AutoModel.from_pretrained(
+                cfg.pretrained_paligemma_path, device_map=device
+            )
+            policy.language_tokenizer = AutoTokenizer.from_pretrained(
+                cfg.pretrained_paligemma_path
+            )
+            # post init
+            policy.s2_model.paligemma_with_expert.to_bfloat16_like_physical_intelligence()
+            policy.s2_model.paligemma_with_expert.set_requires_grad()
+
+        if cfg.pretrained_dino_path:
+            logging.info(process_id + "Loading pretrained dino ...")
+            policy.config.s1_dino_config = AutoConfig.from_pretrained(
+                cfg.pretrained_dino_path
+            ).to_dict()
+            policy.s1_model.fast_visuo_expert.vision_tower = AutoModel.from_pretrained(
+                cfg.pretrained_dino_path, device_map=device
+            )
+            policy.s1_model.fast_visuo_expert.to_bfloat16_like_physical_intelligence()
+            policy.s1_model.fast_visuo_expert.set_requires_grad()
 
     if policy.language_tokenizer is None:
-        policy.language_tokenizer = AutoTokenizer.from_pretrained(
-            cfg.pretrained_tokenizer_path
-        )
+        if cfg.pretrained_tokenizer_path:
+            policy.language_tokenizer = AutoTokenizer.from_pretrained(
+                cfg.pretrained_tokenizer_path
+            )
+        elif cfg.pretrained_comet_path:
+            policy.language_tokenizer = AutoTokenizer.from_pretrained(
+                cfg.pretrained_comet_path, trust_remote_code=True
+            )
+        else:
+            raise ValueError("No tokenizer path provided")
 
     logging.info(process_id + "Creating optimizer and scheduler")
     optimizers, lr_schedulers = make_optimizer_and_scheduler(cfg, policy)
@@ -358,8 +424,14 @@ def train(cfg: TrainPipelineConfig):
         p.numel() for p in policy.parameters() if p.requires_grad
     )
     num_total_params = sum(p.numel() for p in policy.parameters())
-    num_s1_params = sum(p.numel() for p in policy.s1_model.parameters())
-    num_s2_params = sum(p.numel() for p in policy.s2_model.parameters())
+    
+    # Handle different policy types for param counting
+    if policy_type == 'comet':
+        num_pi0_params = sum(p.numel() for p in policy.pi0_model.parameters())
+        num_vqh_params = sum(p.numel() for p in policy.value_query_head.parameters())
+    else:
+        num_s1_params = sum(p.numel() for p in policy.s1_model.parameters())
+        num_s2_params = sum(p.numel() for p in policy.s2_model.parameters())
 
     logging.info(
         process_id
@@ -373,8 +445,14 @@ def train(cfg: TrainPipelineConfig):
         process_id + f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})"
     )
     logging.info(process_id + f"{dataset.num_episodes=}")
-    logging.info(process_id + f"{num_s1_params=} ({format_big_number(num_s1_params)})")
-    logging.info(process_id + f"{num_s2_params=} ({format_big_number(num_s2_params)})")
+    
+    if policy_type == 'comet':
+        logging.info(process_id + f"{num_pi0_params=} ({format_big_number(num_pi0_params)})")
+        logging.info(process_id + f"{num_vqh_params=} ({format_big_number(num_vqh_params)})")
+    else:
+        logging.info(process_id + f"{num_s1_params=} ({format_big_number(num_s1_params)})")
+        logging.info(process_id + f"{num_s2_params=} ({format_big_number(num_s2_params)})")
+    
     logging.info(
         process_id
         + f"{num_learnable_params=} ({format_big_number(num_learnable_params)})"

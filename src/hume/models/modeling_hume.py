@@ -17,7 +17,7 @@ from torch import Tensor, nn
 from transformers import AutoTokenizer
 
 from .. import array_typing as at
-from .configuration_hume import HumeConfig, System2Config
+from .configuration_hume import HumeConfig, System2Config, CometConfig
 from .fast_visuo_expert import FastVisuoExpertConfig, FastVisuoExpertModel
 from .paligemma_with_expert import (
     PaliGemmaWithExpertConfig,
@@ -29,6 +29,8 @@ from .value_query import (
     VQHBackbone,
     VQHBackboneConfig,
 )
+from .comet_models import PI0Pytorch, get_config as get_gemma_config
+from .comet_models.pi0_pytorch import Pi0Config
 
 
 def create_sinusoidal_pos_embedding(
@@ -605,22 +607,25 @@ class HumePolicy(PreTrainedPolicy):
         loss_dict["s1_loss"] = s1_losses.item()
         total_loss += s1_losses
 
-        # add ValueQueryHead log dict to loss_dict
-        # loss_dict = {**loss_dict, **log_dict}
-        loss_dict["entropy"] = log_dict["entropy"].item()
-        loss_dict["actions_mse"] = log_dict["actions_mse"].item()
-        loss_dict["td_err"] = log_dict["td_err"].item()
-        loss_dict["temperature"] = log_dict["temperature"].item()
-        loss_dict["cql_loss"] = log_dict["cql_loss"].item()
-        loss_dict["cql_alpha"] = log_dict["cql_alpha"]
-        loss_dict["cql_diff"] = log_dict["cql_diff"].item()
-        loss_dict["critic_loss"] = log_dict["critic_loss"].item()
-        loss_dict["cql_ood_values"] = log_dict["cql_ood_values"].item()
-        loss_dict["calql_bound_rate"] = log_dict["calql_bound_rate"].item()
-        loss_dict["online_q"] = log_dict["online_q"].item()
-        loss_dict["target_q"] = log_dict["target_q"].item()
-        loss_dict["positive_qs"] = log_dict["positive_qs"].item()
-        loss_dict["actor_loss"] = log_dict["actor_loss"].item()
+        # add ValueQueryHead log dict to loss_dict (grouped for wandb)
+        # critic group
+        loss_dict["critic/td_err"] = log_dict["td_err"].item()
+        loss_dict["critic/critic_loss"] = log_dict["critic_loss"].item()
+        loss_dict["critic/cql_loss"] = log_dict["cql_loss"].item()
+        loss_dict["critic/cql_diff"] = log_dict["cql_diff"].item()
+        # q_values group
+        loss_dict["q_values/online_q"] = log_dict["online_q"].item()
+        loss_dict["q_values/target_q"] = log_dict["target_q"].item()
+        loss_dict["q_values/cql_ood_values"] = log_dict["cql_ood_values"].item()
+        loss_dict["q_values/positive_qs"] = log_dict["positive_qs"].item()
+        # actor group
+        loss_dict["actor/actor_loss"] = log_dict["actor_loss"].item()
+        loss_dict["actor/entropy"] = log_dict["entropy"].item()
+        loss_dict["actor/temperature"] = log_dict["temperature"].item()
+        loss_dict["actor/actions_mse"] = log_dict["actions_mse"].item()
+        # calql group
+        loss_dict["calql/calql_bound_rate"] = log_dict["calql_bound_rate"].item()
+        loss_dict["calql/cql_alpha"] = log_dict["cql_alpha"]
 
         return total_loss, temperature_loss, policy_loss, critic_loss, loss_dict
 
@@ -1078,7 +1083,7 @@ class System2Policy(PreTrainedPolicy):
         
         print(f"Loading the language tokenizer from {pretrained_name_or_path} ...")
         policy.language_tokenizer = AutoTokenizer.from_pretrained(
-            pretrained_name_or_path
+            pretrained_name_or_path, trust_remote_code=True
         )
         return policy
 
@@ -1737,7 +1742,8 @@ class ValueQueryHead(nn.Module):
             img,
             img_mask,
         ) in zip(images, img_masks, strict=False):
-            img_emb = self.paligemma_with_expert.embed_image(img)
+            # FIX: Detach image embeddings to avoid storing PI0 activations in graph
+            img_emb = self.paligemma_with_expert.embed_image(img).detach()
             img_emb = img_emb.to(dtype=torch.bfloat16)
 
             # Normalize image embeddings
@@ -1950,6 +1956,587 @@ class ValueQueryHead(nn.Module):
         print(f"MaxValues: {q_values.max(dim=1)[0].tolist()}")
         print(f"MinValues: {q_values.min(dim=1)[0].tolist()}")
         print(f"MeanValues: {q_values.mean(dim=1)[0].tolist()}")
+        print(f"ActionIndex: {action_index.tolist()}")
+
+        return action_index, q_values
+
+
+class CometPolicy(PreTrainedPolicy):
+    """Policy using PI0Pytorch (from openpi-comet) as backbone with ValueQueryHead for training."""
+
+    config_class = CometConfig
+    name = "comet"
+
+    def __init__(
+        self,
+        config: CometConfig,
+        dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+    ):
+        super().__init__(config)
+        config.validate_features()
+        self.config = config
+
+        # Normalization
+        self.normalize_inputs = Normalize(
+            config.input_features, config.normalization_mapping, dataset_stats
+        )
+        self.normalize_targets = Normalize(
+            config.output_features, config.normalization_mapping, dataset_stats
+        )
+        self.unnormalize_outputs = Unnormalize(
+            config.output_features, config.normalization_mapping, dataset_stats
+        )
+
+        self.language_tokenizer = None
+
+        # Create PI0Pytorch model
+        pi0_config = Pi0Config(
+            dtype=config.dtype,
+            paligemma_variant=config.paligemma_variant,
+            action_expert_variant=config.action_expert_variant,
+            action_dim=config.max_action_dim,
+            action_horizon=config.chunk_size,
+            max_token_len=config.max_token_len,
+            pi05=config.pi05,
+        )
+        self.pi0_model = PI0Pytorch(pi0_config)
+
+        # Create ValueQueryHead using PI0's paligemma_with_expert
+        self.value_query_head = CometValueQueryHead(
+            paligemma_with_expert=self.pi0_model.paligemma_with_expert,
+            config=config,
+        )
+
+        self.reset()
+        self._set_requires_grad()
+
+    def _set_requires_grad(self):
+        """Freeze PI0 model if configured."""
+        if self.config.freeze_pi0:
+            self.pi0_model.eval()
+            for param in self.pi0_model.parameters():
+                param.requires_grad = False
+            print("[CometPolicy] PI0Pytorch model frozen")
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.config.freeze_pi0:
+            self.pi0_model.eval()
+
+    def reset(self):
+        """Reset action queue."""
+        self._action_queue = deque([], maxlen=self.config.n_action_steps)
+
+    def get_trunk_params(self) -> list:
+        """Get parameters excluding actor/critic/temperature."""
+        exclude_params = set()
+        exclude_modules = [
+            self.value_query_head.calql.policy,
+            self.value_query_head.calql.critics,
+            self.value_query_head.calql.temperature,
+        ]
+        for module in exclude_modules:
+            for param in module.parameters():
+                exclude_params.add(id(param))
+        return [param for param in self.parameters() if id(param) not in exclude_params]
+
+    def get_optim_params(self):
+        return self.parameters()
+
+    def get_actor_optim_params(self):
+        return self.value_query_head.calql.policy.parameters()
+
+    def get_critics_optim_params(self):
+        return self.value_query_head.calql.critics.parameters()
+
+    def get_temperature_optim_params(self):
+        return self.value_query_head.calql.temperature.parameters()
+
+    @torch.no_grad
+    def select_action(
+        self, batch: dict[str, Tensor], noise: Tensor | None = None
+    ) -> Tensor:
+        """Select actions for evaluation."""
+        self.eval()
+
+        batch = self.normalize_inputs(batch)
+
+        images, img_masks = self.prepare_images(batch)
+        state = self.prepare_state(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch)
+
+        # Sample actions using PI0
+        actions = self.pi0_model.sample_actions(
+            device=state.device,
+            images=images,
+            img_masks=img_masks,
+            lang_tokens=lang_tokens,
+            lang_masks=lang_masks,
+            state=state,
+            noise=noise,
+            num_steps=self.config.num_steps,
+        )
+
+        # Unpad actions
+        original_action_dim = self.config.action_feature.shape[0]
+        actions = actions[:, :, :original_action_dim]
+        actions = self.unnormalize_outputs({"action": actions})["action"]
+
+        return actions
+
+    def forward(
+        self, batch: dict[str, Tensor], noise=None, time=None
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        """Forward pass for training ValueQueryHead."""
+        batch = self.normalize_inputs(batch)
+        batch = self.normalize_targets(batch)
+
+        images, img_masks = self.prepare_images(batch)
+        lang_tokens, lang_masks = self.prepare_language(batch)
+
+        # Get VQH images (next observation)
+        vqh_images, vqh_img_masks = self.prepare_images(
+            batch, map(lambda x: f"{x}.vqh", self.config.image_features)
+        )
+
+        # ValueQueryHead forward
+        temperature_loss, policy_loss, critic_loss, log_dict = (
+            self.value_query_head.forward(
+                images,
+                img_masks,
+                lang_tokens,
+                lang_masks,
+                vqh_images,
+                vqh_img_masks,
+                batch["action"][:, : self.config.vqh_chunk_size, :],
+                batch["reward.vqh"],
+                batch["mc.vqh"],
+                batch["reward.vqh"].to(dtype=torch.float),
+            )
+        )
+
+        total_loss = torch.tensor(0.0, device=batch["action"].device)
+        loss_dict = {
+            # critic group
+            "critic/td_err": log_dict["td_err"].item(),
+            "critic/critic_loss": log_dict["critic_loss"].item(),
+            "critic/cql_loss": log_dict["cql_loss"].item(),
+            "critic/cql_diff": log_dict["cql_diff"].item(),
+            # q_values group
+            "q_values/online_q": log_dict["online_q"].item(),
+            "q_values/target_q": log_dict["target_q"].item(),
+            "q_values/cql_ood_values": log_dict["cql_ood_values"].item(),
+            "q_values/positive_qs": log_dict["positive_qs"].item(),
+            # actor group
+            "actor/actor_loss": log_dict["actor_loss"].item(),
+            "actor/entropy": log_dict["entropy"].item(),
+            "actor/temperature": log_dict["temperature"].item(),
+            "actor/actions_mse": log_dict["actions_mse"].item(),
+            # calql group
+            "calql/calql_bound_rate": log_dict["calql_bound_rate"].item(),
+            "calql/cql_alpha": log_dict["cql_alpha"],
+        }
+
+        return total_loss, temperature_loss, policy_loss, critic_loss, loss_dict
+
+    def prepare_images(self, batch, image_features=None):
+        """Prepare images with preprocessing."""
+        images = []
+        img_masks = []
+
+        image_features = image_features or self.config.image_features
+        present_img_keys = [key for key in image_features if key in batch]
+        missing_img_keys = [key for key in image_features if key not in batch]
+
+        if len(present_img_keys) == 0:
+            raise ValueError(
+                f"All image features missing. (batch: {batch.keys()}) (image_features:{self.config.image_features})"
+            )
+
+        for key in present_img_keys:
+            img = batch[key]
+
+            if self.config.resize_imgs_with_padding is not None:
+                img = resize_with_pad(img, *self.config.resize_imgs_with_padding, pad_value=0)
+
+            # Normalize to [-1, 1] for SigLIP
+            img = img * 2.0 - 1.0
+
+            bsize = img.shape[0]
+            device = img.device
+            mask = torch.ones(bsize, dtype=torch.bool, device=device)
+            images.append(img)
+            img_masks.append(mask)
+
+        for num_empty_cameras in range(len(missing_img_keys)):
+            if num_empty_cameras >= self.config.empty_cameras:
+                break
+            img = torch.ones_like(img) * -1
+            mask = torch.zeros_like(mask)
+            images.append(img)
+            img_masks.append(mask)
+
+        return images, img_masks
+
+    def prepare_language(self, batch) -> tuple[Tensor, Tensor]:
+        """Tokenize text input."""
+        device = batch[OBS_ROBOT].device
+        tasks = batch["task"]
+        tasks = [task if task.endswith("\n") else f"{task}\n" for task in tasks]
+
+        tokenized = self.language_tokenizer.__call__(
+            tasks,
+            padding="max_length",
+            padding_side="right",
+            max_length=self.config.tokenizer_max_length,
+            return_tensors="pt",
+            truncation=True,
+        )
+        lang_tokens = tokenized["input_ids"].to(device=device)
+        lang_masks = tokenized["attention_mask"].to(device=device, dtype=torch.bool)
+
+        return lang_tokens, lang_masks
+
+    def prepare_state(self, batch, feature=None):
+        """Pad state."""
+        feature = feature or OBS_ROBOT
+        state = pad_vector(batch[feature], self.config.max_state_dim)
+        return state
+
+    def prepare_action(self, batch):
+        """Pad action."""
+        actions = pad_vector(batch[ACTION], self.config.max_action_dim)
+        return actions
+
+    def _save_pretrained(self, save_directory) -> None:
+        super()._save_pretrained(save_directory)
+        print(f"Saving language tokenizer to {save_directory} ...")
+        self.language_tokenizer.save_pretrained(save_directory)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_name_or_path, **kwargs):
+        """Load CometPolicy from pretrained weights."""
+        import glob
+        import os
+        import safetensors
+
+        print(f"[CometPolicy.from_pretrained] Loading from {pretrained_name_or_path}")
+
+        # Load config
+        if "config" not in kwargs:
+            config = cls.config_class.from_pretrained(pretrained_name_or_path)
+        else:
+            config = kwargs["config"]
+
+        dataset_stats = kwargs.get("dataset_stats")
+        policy = cls(config, dataset_stats)
+
+        # Load weights
+        weight_paths = sorted(glob.glob(os.path.join(pretrained_name_or_path, "*.safetensors")))
+        model_state_dict = policy.state_dict()
+
+        for weight_path in weight_paths:
+            checkpoint_state_dict = safetensors.torch.load_file(weight_path)
+
+            filtered_state_dict = {}
+            skipped_keys = []
+
+            for key, value in checkpoint_state_dict.items():
+                if key in model_state_dict:
+                    if value.shape == model_state_dict[key].shape:
+                        filtered_state_dict[key] = value
+                    else:
+                        skipped_keys.append(f"{key}: shape mismatch {value.shape} vs {model_state_dict[key].shape}")
+                else:
+                    skipped_keys.append(f"{key}: not in model")
+
+            if skipped_keys:
+                print(f"Skipping {len(skipped_keys)} keys from {weight_path}:")
+                for sk in skipped_keys[:10]:
+                    print(f"  - {sk}")
+                if len(skipped_keys) > 10:
+                    print(f"  ... and {len(skipped_keys) - 10} more")
+
+            incompatible = policy.load_state_dict(filtered_state_dict, strict=False)
+            if incompatible.missing_keys:
+                print(f"Missing keys: {len(incompatible.missing_keys)}")
+            if incompatible.unexpected_keys:
+                print(f"Unexpected keys: {len(incompatible.unexpected_keys)}")
+
+        print(f"Loading tokenizer from {pretrained_name_or_path} ...")
+        policy.language_tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_name_or_path, trust_remote_code=True
+        )
+        return policy
+
+    @classmethod
+    def from_comet_pretrained(cls, comet_weight_path: str, config: CometConfig, dataset_stats=None):
+        """Load policy with comet pretrained weights specifically for PI0 model.
+        
+        Args:
+            comet_weight_path: Path to comet weights directory containing safetensors files
+            config: CometConfig instance
+            dataset_stats: Dataset statistics for normalization
+        """
+        import glob
+        import os
+        import safetensors
+
+        print(f"[CometPolicy.from_comet_pretrained] Loading PI0 weights from {comet_weight_path}")
+
+        policy = cls(config, dataset_stats)
+
+        # Load PI0 weights
+        weight_paths = sorted(glob.glob(os.path.join(comet_weight_path, "*.safetensors")))
+        pi0_state_dict = policy.pi0_model.state_dict()
+
+        loaded_count = 0
+        for weight_path in weight_paths:
+            checkpoint_state_dict = safetensors.torch.load_file(weight_path)
+
+            filtered_state_dict = {}
+            for key, value in checkpoint_state_dict.items():
+                if key in pi0_state_dict:
+                    if value.shape == pi0_state_dict[key].shape:
+                        filtered_state_dict[key] = value
+                        loaded_count += 1
+
+            if filtered_state_dict:
+                policy.pi0_model.load_state_dict(filtered_state_dict, strict=False)
+
+        print(f"[CometPolicy] Loaded {loaded_count} weights into PI0 model")
+
+        # Freeze PI0 if configured
+        if config.freeze_pi0:
+            policy._set_requires_grad()
+
+        # Load tokenizer
+        policy.language_tokenizer = AutoTokenizer.from_pretrained(
+            comet_weight_path, trust_remote_code=True
+        )
+
+        return policy
+
+
+class CometValueQueryHead(nn.Module):
+    """ValueQueryHead adapted for PI0Pytorch model."""
+
+    def __init__(self, paligemma_with_expert, config):
+        super().__init__()
+        self.config = config
+        self.paligemma_with_expert = paligemma_with_expert
+
+        # VQH backbone
+        vqh_backbone_config = VQHBackboneConfig()
+        self.vqh_backbone = VQHBackbone(config=vqh_backbone_config)
+
+        # CalQL module
+        # Get hidden size from paligemma config
+        hidden_size = 2048  # Default gemma_2b hidden size
+        if hasattr(paligemma_with_expert, 'config'):
+            if hasattr(paligemma_with_expert.config, 'text_config'):
+                hidden_size = paligemma_with_expert.config.text_config.hidden_size
+
+        cal_ql_config = CalQlConfig(
+            obs_encoded_dim=hidden_size,
+            action_dim=config.vqh_chunk_size * config.action_feature.shape[0],
+            actor_lr=config.actor_lr,
+            critic_lr=config.critic_lr,
+            temp_lr=config.temp_lr,
+            actor_wps=getattr(config, 'actor_warmup_steps', 2000),
+            critic_wps=getattr(config, 'critic_warmup_steps', 2000),
+            cql_alpha=getattr(config, 'cql_alpha', 5.0),
+            cql_n_actions=getattr(config, 'cql_n_actions', 4),
+            target_entropy_coef=getattr(config, 'target_entropy_coef', -1.0),
+            discount=config.discount,
+            policy_hidden_dims=getattr(config, 'policy_hidden_dims', [512, 512, 256]),
+            critic_hidden_dims=getattr(config, 'critic_hidden_dims', [1024, 512, 256]),
+            use_layer_norm=getattr(config, 'use_layer_norm', True),
+        )
+        self.calql = CalQL(config=cal_ql_config)
+
+        self.query_embedding = nn.Parameter(
+            torch.zeros(hidden_size, dtype=torch.bfloat16)
+        )
+
+    def embed_prefix(
+        self, images, img_masks, lang_tokens, lang_masks
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Embed images and language tokens."""
+        embs = []
+        pad_masks = []
+        att_masks = []
+
+        for img, img_mask in zip(images, img_masks, strict=False):
+            # FIX: Detach image embeddings to avoid storing PI0 activations in graph
+            # This significantly reduces memory when PI0 is frozen
+            img_emb = self.paligemma_with_expert.embed_image(img).detach()
+            img_emb = img_emb.to(dtype=torch.bfloat16)
+
+            img_emb_dim = img_emb.shape[-1]
+            img_emb = img_emb * torch.tensor(
+                img_emb_dim**0.5, dtype=img_emb.dtype, device=img_emb.device
+            )
+
+            bsize, num_img_embs = img_emb.shape[:2]
+            img_mask = img_mask[:, None].expand(bsize, num_img_embs)
+
+            embs.append(img_emb)
+            pad_masks.append(img_mask)
+            att_masks += [0] * num_img_embs
+
+        lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens).detach()
+        lang_emb_dim = lang_emb.shape[-1]
+        lang_emb = lang_emb * math.sqrt(lang_emb_dim)
+
+        embs.append(lang_emb)
+        pad_masks.append(lang_masks)
+
+        num_lang_embs = lang_emb.shape[1]
+        att_masks += [0] * num_lang_embs
+
+        embs = torch.cat(embs, dim=1)
+        pad_masks = torch.cat(pad_masks, dim=1)
+        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
+        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+
+        # Add query embedding
+        seq_lengths = pad_masks.sum(dim=1).long()
+        seq_len = embs.shape[1]
+        new_seq_len = seq_len + 1
+
+        new_embs = torch.zeros(
+            (bsize, new_seq_len, embs.shape[-1]), dtype=embs.dtype, device=embs.device
+        )
+        new_pad_masks = torch.zeros(
+            (bsize, new_seq_len), dtype=pad_masks.dtype, device=pad_masks.device
+        )
+        new_att_masks = torch.zeros(
+            (bsize, new_seq_len), dtype=att_masks.dtype, device=att_masks.device
+        )
+
+        batch_idx = torch.arange(bsize, device=embs.device).view(-1, 1)
+        seq_idx = torch.arange(seq_len, device=embs.device).view(1, -1).expand(bsize, -1)
+        mask = seq_idx >= seq_lengths.unsqueeze(1)
+        new_seq_idx = seq_idx + mask.long()
+
+        new_embs[batch_idx, new_seq_idx] = embs
+        new_pad_masks[batch_idx, new_seq_idx] = pad_masks
+        new_att_masks[batch_idx, new_seq_idx] = att_masks
+        new_embs[torch.arange(bsize), seq_lengths] = self.query_embedding.unsqueeze(0).expand(bsize, -1)
+        new_pad_masks[torch.arange(bsize), seq_lengths] = True
+        new_att_masks[torch.arange(bsize), seq_lengths] = False
+
+        return new_embs, new_pad_masks, new_att_masks
+
+    def process_next_obs(
+        self, images, img_masks, vqh_images, vqh_img_masks, lang_tokens, lang_masks
+    ):
+        """Process next observation."""
+        new_images = []
+        new_img_masks = []
+
+        for img, next_img, img_mask, next_img_mask in zip(
+            images, vqh_images, img_masks, vqh_img_masks
+        ):
+            new_images.append(torch.cat([img, next_img], dim=0))
+            new_img_masks.append(torch.cat([img_mask, next_img_mask], dim=0))
+
+        new_lang_tokens = torch.cat([lang_tokens, lang_tokens], dim=0)
+        new_lang_masks = torch.cat([lang_masks, lang_masks], dim=0)
+
+        return new_images, new_img_masks, new_lang_tokens, new_lang_masks
+
+    @jaxtyped(typechecker=typechecker)
+    def forward(
+        self,
+        images: list[Float[Tensor, "batch 3 224 224"]],
+        img_masks: list[Bool[Tensor, " batch"]],
+        lang_tokens: Int64[Tensor, "batch seq_len"],
+        lang_masks: Bool[Tensor, "batch seq_len"],
+        vqh_images: list[Float[Tensor, "batch 3 224 224"]],
+        vqh_img_masks: list[Bool[Tensor, " batch"]],
+        actions: Float[Tensor, "batch vqh_chunk_size action_dim"],
+        rewards: Float[Tensor, " batch"],
+        mc_returns: Float[Tensor, " batch"],
+        masks: Float[Tensor, " batch"],
+    ) -> tuple[Tensor, Tensor, Tensor, dict]:
+        """Forward pass."""
+        images, img_masks, lang_tokens, lang_masks = self.process_next_obs(
+            images, img_masks, vqh_images, vqh_img_masks, lang_tokens, lang_masks
+        )
+
+        embs, pad_masks, att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        suffix_out = self.vqh_backbone.forward(
+            attention_mask=att_2d_masks,
+            position_ids=position_ids,
+            inputs_embeds=embs,
+        )
+
+        batch_indices = torch.arange(suffix_out.shape[0], device=suffix_out.device)
+        query_embedding_idx = pad_masks.sum(-1).long() - 1
+        query_embedding = suffix_out[batch_indices, query_embedding_idx]
+
+        # FIX: Normalize actions to [-1, 1] range for CalQL (which uses Tanh-squashed policy)
+        # MEAN_STD normalization gives ~N(0,1) but doesn't guarantee [-1,1] range
+        # Use tanh to smoothly compress to [-1, 1]
+        actions_flat = actions.view(actions.shape[0], -1)
+        actions_normalized = torch.tanh(actions_flat)  # Compress to [-1, 1]
+        
+        cal_ql_batch = dict(
+            encoded_observations=query_embedding[: int(query_embedding.shape[0] / 2)].to(dtype=torch.float32),
+            encoded_next_observations=query_embedding[int(query_embedding.shape[0] / 2) :].to(dtype=torch.float32),
+            actions=actions_normalized,
+            rewards=rewards,
+            mc_returns=mc_returns,
+            masks=masks,
+        )
+        
+        temperature_loss, policy_loss, critic_loss, log_dict = self.calql(cal_ql_batch)
+
+        return temperature_loss, policy_loss, critic_loss, log_dict
+
+    @jaxtyped(typechecker=typechecker)
+    def select_q_actions(
+        self,
+        images: list[Float[Tensor, "Batch 3 224 224"]],
+        img_masks: list[Bool[Tensor, " Batch"]],
+        lang_tokens: Int64[Tensor, "Batch seq_len"],
+        lang_masks: Bool[Tensor, "Batch seq_len"],
+        noise_actions: Float[Tensor, "Batch s2_candidates_num vqh_chunk_size action_dim"],
+    ) -> tuple[Int64[Tensor, " Batch"], Float[Tensor, "Batch s2_candidates_num"]]:
+        """Select best action based on Q values."""
+        batch_size = noise_actions.shape[0]
+        s2_candidates_num = noise_actions.shape[1]
+
+        embs, pad_masks, att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        suffix_out = self.vqh_backbone.forward(
+            attention_mask=att_2d_masks,
+            position_ids=position_ids,
+            inputs_embeds=embs,
+        )
+
+        batch_indices = torch.arange(suffix_out.shape[0], device=suffix_out.device)
+        query_embedding_idx = pad_masks.sum(-1).long() - 1
+        query_embedding = suffix_out[batch_indices, query_embedding_idx]
+
+        noise_actions = noise_actions.reshape(batch_size, s2_candidates_num, -1)
+        q_values = self.calql.get_q_values(query_embedding, noise_actions)
+
+        action_index = torch.argmax(q_values, dim=1)
+
+        print(f"MaxValues: {q_values.max(dim=1)[0].tolist()}")
+        print(f"MinValues: {q_values.min(dim=1)[0].tolist()}")
         print(f"ActionIndex: {action_index.tolist()}")
 
         return action_index, q_values

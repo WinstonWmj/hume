@@ -517,3 +517,208 @@ class System2Config(PreTrainedConfig):
     @property
     def s1_action_steps(self) -> None:
         return 1
+
+
+@PreTrainedConfig.register_subclass("comet")
+@dataclass
+class CometConfig(PreTrainedConfig):
+    """Configuration for CometPolicy - uses PI0Pytorch model with ValueQueryHead."""
+
+    # Input / output structure
+    type: str = "comet"
+    n_obs_steps: int = 1
+    chunk_size: int = 32  # PI0 action horizon
+    n_action_steps: int = 32
+
+    normalization_mapping: dict[str, NormalizationMode] = field(
+        default_factory=lambda: {
+            "VISUAL": NormalizationMode.IDENTITY,
+            "STATE": NormalizationMode.MEAN_STD,
+            "ACTION": NormalizationMode.MEAN_STD,
+        }
+    )
+
+    # State and action dimensions
+    max_state_dim: int = 32
+    max_action_dim: int = 32
+
+    # Image preprocessing
+    resize_imgs_with_padding: tuple[int, int] = (224, 224)
+    empty_cameras: int = 0
+
+    # PI0 model settings
+    pi05: bool = True
+    dtype: str = "bfloat16"
+    paligemma_variant: str = "gemma_2b"
+    action_expert_variant: str = "gemma_300m"
+    max_token_len: int = 200  # For pi05
+
+    # Comet pretrained weights path
+    comet_weight_path: str = None
+
+    # Tokenizer
+    tokenizer_max_length: int = 200
+
+    # Projector (for compatibility)
+    proj_width: int = 2048  # gemma_2b width
+
+    # Decoding
+    num_steps: int = 10
+
+    # Attention utils
+    use_cache: bool = True
+    attention_implementation: str = "eager"
+
+    # Finetuning settings - freeze PI0, train VQH only
+    freeze_pi0: bool = True
+    train_vqh_only: bool = True
+
+    # Training presets
+    optimizer_lr: float = 2.5e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_eps: float = 1e-8
+    optimizer_weight_decay: float = 1e-10
+
+    scheduler_warmup_steps: int = 1_000
+    scheduler_decay_steps: int = 30_000
+    scheduler_decay_lr: float = 2.5e-6
+
+    # ValueQueryHead settings
+    num_pos: int = 3
+    discount: float = 0.99
+    actor_lr: float = 3e-4
+    critic_lr: float = 3e-4
+    temp_lr: float = 3e-4
+    qf_lr: float = 3e-4
+    next_obs_offset: int = 10
+    vqh_chunk_size: int = 10
+    
+    # CalQL settings
+    cql_alpha: float = 5.0              # CQL penalty weight
+    cql_n_actions: int = 4              # Number of OOD actions to sample
+    target_entropy_coef: float = -1.0   # target_entropy = coef * action_dim
+    actor_warmup_steps: int = 2000      # Actor optimizer warmup steps
+    critic_warmup_steps: int = 2000     # Critic optimizer warmup steps
+    
+    # CalQL network architecture
+    policy_hidden_dims: list = field(default_factory=lambda: [1024, 512, 256])
+    critic_hidden_dims: list = field(default_factory=lambda: [2048, 1024, 512])
+    use_layer_norm: bool = True         # LayerNorm for training stability
+
+    # PaliGemma config (for compatibility with VQH)
+    paligemma_config: dict = field(
+        default_factory=lambda: {
+            "bos_token_id": 2,
+            "eos_token_id": 1,
+            "hidden_size": 2048,
+            "ignore_index": -100,
+            "image_token_index": 257152,
+            "model_type": "paligemma",
+            "pad_token_id": 0,
+            "projection_dim": 2048,
+            "text_config": {
+                "hidden_activation": "gelu_pytorch_tanh",
+                "hidden_size": 2048,
+                "intermediate_size": 16384,
+                "model_type": "gemma",
+                "num_attention_heads": 8,
+                "num_hidden_layers": 18,
+                "num_image_tokens": 256,
+                "num_key_value_heads": 1,
+                "torch_dtype": "float32",
+                "vocab_size": 257152,
+            },
+            "torch_dtype": "float32",
+            "transformers_version": "4.48.1",
+            "vision_config": {
+                "hidden_size": 1152,
+                "intermediate_size": 4304,
+                "model_type": "siglip_vision_model",
+                "num_attention_heads": 16,
+                "num_hidden_layers": 27,
+                "num_image_tokens": 256,
+                "patch_size": 14,
+                "projection_dim": 2048,
+                "projector_hidden_act": "gelu_fast",
+                "vision_use_head": False,
+            },
+            "vocab_size": 257152,
+        }
+    )
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.n_action_steps > self.chunk_size:
+            raise ValueError(
+                f"The chunk size is the upper bound for the number of action steps. Got "
+                f"{self.n_action_steps} for `n_action_steps` and {self.chunk_size} for `chunk_size`."
+            )
+        if self.n_obs_steps != 1:
+            raise ValueError(
+                f"Multiple observation steps not handled yet. Got `nobs_steps={self.n_obs_steps}`"
+            )
+
+    def validate_features(self) -> None:
+        for i in range(self.empty_cameras):
+            key = f"observation.images.empty_camera_{i}"
+            empty_camera = PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(3, 480, 640),
+            )
+            self.input_features[key] = empty_camera
+
+    def get_optimizer_preset(self) -> dict[AdamWConfig]:
+        qf_optimizer = AdamWConfig(
+            lr=self.qf_lr,
+            weight_decay=0,
+            grad_clip_norm=10,
+        )
+        actor_optimizer = AdamWConfig(
+            lr=self.actor_lr,
+            weight_decay=0,
+            grad_clip_norm=10,
+        )
+        trunk_optimizer = AdamWConfig(
+            lr=self.optimizer_lr,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+            weight_decay=self.optimizer_weight_decay,
+        )
+        return dict(
+            qf_optimizer=qf_optimizer,
+            actor_optimizer=actor_optimizer,
+            trunk_optimizer=trunk_optimizer,
+        )
+
+    def get_scheduler_preset(self):
+        return CosineDecayWithWarmupSchedulerConfig(
+            peak_lr=self.optimizer_lr,
+            decay_lr=self.scheduler_decay_lr,
+            num_warmup_steps=self.scheduler_warmup_steps,
+            num_decay_steps=self.scheduler_decay_steps,
+        )
+
+    @property
+    def observation_delta_indices(self) -> None:
+        return None
+
+    @property
+    def action_delta_indices(self) -> list:
+        return list(range(self.chunk_size))
+
+    @property
+    def reward_delta_indices(self) -> None:
+        return None
+
+    @property
+    def slide(self) -> None:
+        return 1
+
+    @property
+    def s1_action_steps(self) -> None:
+        return 1
+
+    @property
+    def s2_action_steps(self) -> None:
+        return self.chunk_size

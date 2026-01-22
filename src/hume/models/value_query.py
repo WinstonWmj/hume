@@ -644,30 +644,45 @@ class CalQlConfig(PretrainedConfig):
         temp_lr=3e-4,
         actor_wps=2000,
         critic_wps=2000,
+        cql_alpha=5.0,
+        cql_n_actions=4,
+        target_entropy_coef=-1.0,
+        discount=0.99,
+        policy_hidden_dims=None,
+        critic_hidden_dims=None,
+        use_layer_norm=True,
         **kwargs,
     ):
         self.cql_clip_diff_min = -np.inf
         self.cql_clip_diff_max = np.inf
-        self.cql_alpha = 5.0
+        self.cql_alpha = cql_alpha
         self.cql_autotune_alpha = False
         self.action_dim = action_dim
-        self.target_entropy = -self.action_dim
+        self.target_entropy = target_entropy_coef * self.action_dim
         self.obs_encoded_dim = obs_encoded_dim
         self.cql_temperature_init_value = 1.0
         self.critic_ensemble_size = 2
-        self.cql_n_actions = 4
+        self.cql_n_actions = cql_n_actions
         self.cql_max_target_backup = True
+        self.discount = discount
+        
+        # Network architecture - larger for high-dim action spaces
+        if policy_hidden_dims is None:
+            policy_hidden_dims = [512, 512, 256]
+        if critic_hidden_dims is None:
+            critic_hidden_dims = [1024, 512, 256]
+            
         self.policy_network_kwargs = dict(
             input_dim=self.obs_encoded_dim,
-            hidden_dims=[256, 256],
+            hidden_dims=policy_hidden_dims,
             activate_final=True,
-            use_layer_norm=False,
+            use_layer_norm=use_layer_norm,
         )
         self.critic_network_kwargs = dict(
             input_dim=self.obs_encoded_dim + self.action_dim,
-            hidden_dims=[256, 256],
+            hidden_dims=critic_hidden_dims,
             activate_final=True,
-            use_layer_norm=False,
+            use_layer_norm=use_layer_norm,
         )
         self.policy_kwargs = dict(
             tanh_squash_distribution=True,
@@ -676,7 +691,7 @@ class CalQlConfig(PretrainedConfig):
         self.critic_subsample_size = None
         self.cql_max_target_backup = True
         self.backup_entropy = False
-        self.discount = 0.98
+        # self.discount is set from constructor parameter
         self.goal_conditioned = True
         self.gc_kwargs = dict(
             negative_proportion=0.0,

@@ -13,10 +13,10 @@ fi
 GPUS=${GPUS:-8}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NODES=$((GPUS / GPUS_PER_NODE))
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-8}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-48}
 wandb_enable=${wandb_enable:-true}
 wandb_mode=${wandb_mode:-offline}
-num_workers=${num_workers:-0}
+num_workers=${num_workers:-16}  # 2 workers per GPU for 8 GPUs
 
 # set environments
 source scripts/env.behavior.sh
@@ -47,75 +47,58 @@ data_map["libero_goal"]=libero_goal_no_noops_1.0.0_lerobot
 data_map["libero_10"]=libero_10_no_noops_1.0.0_lerobot
 data_map["behavior"]=behavior
 
-
-declare -A pretrained_map
-pretrained_map["libero_spatial"]=/path/to/pretrained_system2
-pretrained_map["libero_object"]=/mnt/mnt/public_zgc/models/Hume-vla/Libero-Object-1
-pretrained_map["libero_goal"]=outputs/hume_s2/2025-06-08/16-38-43_hume_s2_libero_goal_no_noops_1.0.0_lerobot_ck4_gpu1_lr5e-5_bs8_s200k/checkpoints/000005/pretrained_model
-pretrained_map["libero_10"]=/path/to/pretrained_system2
-pretrained_map["behavior"]=outputs/hume_s2/2026-01-20/12-35-34_hume_s2_behavior_ck30_gpu8_lr5e-5_bs8_s1600k/checkpoints/0010000/pretrained_model/
-pretrained_dino_path=/mnt/project_rlinf/mjwei/download_models/facebook/dinov2-small
+# Comet weights path
+declare -A pretrained_comet_map
+pretrained_comet_map["behavior"]=/mnt/project_rlinf/mjwei/download_models/openpi_comet/sunshk/comet_weights_pytorch_2/pi05-b1kpt12-cs32
 
 data_name=behavior
 dataset=${data_map[$data_name]}
 echo "dataset: ${dataset}"
-cfg=$(echo $dataset | sed 's/^\([a-zA-Z]\+\).*/\1/')
+# Use comet-specific config file
+cfg="behavior_comet"
 
-# Hyper Parameters
-s1_chunk_size=15
-s2_chunk_size=30
-vqh_chunk_size=15
-s1_his_state_size=1
+# Hyper Parameters for CometPolicy
+# NOTE: chunk_size should match PI0's action_horizon (32 for comet)
+chunk_size=32
+# VQH chunk size: should match chunk_size for no-receding-horizon control
+# CalQL action_dim = vqh_chunk_size * 23 = 32 * 23 = 736
+vqh_chunk_size=32
 
-theta2=1.0
-theta1=1.0
-noise_slides_alp=0.0
-noise_slides_eps=0.0
-cache_s2_actions=
+# PI0 settings
+freeze_pi0=true
 
-lr=5e-5
-critic_lr=1e-5
-actor_lr=1e-5
-temp_lr=2e-5
+lr=2e-4
+critic_lr=3e-4
+actor_lr=3e-4
+temp_lr=3e-4
 
-steps=${steps:-$((GPUS * 200000))}
-save_freq=${save_freq:-5000}
+steps=${steps:-$((GPUS * 20000))}
+save_freq=${save_freq:-1000}
 
 # exp names
-train_args="${theta2:+--theta2=${theta2}} "\
-"${theta1:+--theta1=${theta1}} "\
-"${noise_slides_eps:+--noise_slides_eps=${noise_slides_eps}} "\
-"${noise_slides_alp:+--noise_slides_alp=${noise_slides_alp}} "\
-"${cache_s2_actions:+--cache_s2_actions=${cache_s2_actions}} "
+train_args="${freeze_pi0:+--freeze_pi0=${freeze_pi0}} "
 
-job_name="${data_name}_ck${s1_chunk_size}-${s2_chunk_size}-${vqh_chunk_size}_"\
-"sh-${s1_his_state_size}_"\
-"${theta1:+theta${theta1}-${theta2}_}"\
-"${noise_slides_eps:+eps${noise_slides_eps}_}"\
-"${noise_slides_alp:+alp${noise_slides_alp}_}"\
-"${cache_s2_actions:+cache_}"\
+job_name="comet_${data_name}_ck${chunk_size}_vqh${vqh_chunk_size}_"\
+"${freeze_pi0:+frozen_}"\
 "gpu${GPUS}_lr${lr}_${critic_lr}_${actor_lr}_${temp_lr}_"\
 "bs${PER_DEVICE_BATCH_SIZE}_"\
 "s$((steps / 1000))k"
 
-pretrained_s2_path=${pretrained_map[$data_name]}
-echo "pretrained_s2_path: ${pretrained_s2_path}"
+pretrained_comet_path=${pretrained_comet_map[$data_name]}
+echo "pretrained_comet_path: ${pretrained_comet_path}"
 
 # Launch training
 echo "train_args: ${train_args}"
 echo "job_name: ${job_name}"
 CMD="accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${train_args} \
-  --pretrained_s2_path=${pretrained_s2_path} \
-  --policy.type=hume \
-  --pretrained_dino_path=${pretrained_dino_path} \
+  --pretrained_comet_path=${pretrained_comet_path} \
   --config_path=config/${cfg}.json \
   --dataset.repo_id=${dataset} \
   --dataset.video_backend="pyav" \
   --dataset.image_transforms.enable=true \
   --num_workers=${num_workers} \
   --policy_optimizer_lr=${lr} \
-  --s1_chunk_size=${s1_chunk_size} \
-  --s2_chunk_size=${s2_chunk_size} \
+  --s2_chunk_size=${chunk_size} \
   --steps=${steps} \
   --batch=${PER_DEVICE_BATCH_SIZE} \
   --save_freq=${save_freq} \
@@ -132,12 +115,12 @@ CMD="accelerate launch $ACCELERATE_ARGS src/hume/training/train_vqh_s1.py ${trai
   --actor_lr=${actor_lr} \
   --temp_lr=${temp_lr} \
   --checkpoints_total_limit=0 \
-  --s1_his_state_size=${s1_his_state_size}
+  --output_base=comet_vqh
 "
 export REPO_PATH=$(dirname "$(dirname "${BASH_SOURCE[0]}")")
 LOG_DIR="${REPO_PATH}/outputs/logs/$(date +'%Y%m%d-%H:%M:%S')-${job_name}" #/$(date +'%Y%m%d-%H:%M:%S')"
 mkdir -p "${LOG_DIR}"
-MEGA_LOG_FILE="${LOG_DIR}/run_vqh_s1.log"
+MEGA_LOG_FILE="${LOG_DIR}/run_vqh_comet.log"
 echo MEGA_LOG_FILE: ${MEGA_LOG_FILE}
 echo ${CMD} > ${MEGA_LOG_FILE}
 ${CMD} 2>&1 | tee -a ${MEGA_LOG_FILE}

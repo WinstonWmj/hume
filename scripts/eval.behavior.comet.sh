@@ -5,12 +5,12 @@ export CUDA_VISIBLE_DEVICES=4
 # export PYTHONPATH=/mnt/project_rlinf/mjwei/repo/BEHAVIOR-1K-latest-comet/OmniGibson:$PYTHONPATH
 export OMNIGIBSON_DATA_PATH=/mnt/public/quanlu/BEHAVIOR-1K-datasets
 # PYTHONUNBUFFERED=1 is used to prevent buffering of stdout and stderr, so that the output is displayed immediately.
-PYTHONUNBUFFERED=1 python src/hume/serve_b1k.py \
+PYTHONUNBUFFERED=1 python src/hume/serve_b1k_comet.py \
     --port=8000 \
     --task-name=turning_on_radio \
     --control-mode=receeding_horizon \
-    --replan-steps=15  \
-    --s2-replan-steps=30 \
+    --replan-steps=32  \
+    --s2-replan-steps=32 \
     --s2-candidates-num=5 \
     --no-post-process-action \
-    --ckpt_path=/mnt/public/mjwei/download_models/hume_ckpts/2026-01-20/18-06-31_behavior_ck15-30-15_sh-1_theta1.0-1.0_eps0.0_alp0.0_gpu8_lr5e-5_1e-5_1e-5_2e-5_bs8_s1600k/checkpoints/0010000/pretrained_model
+    --ckpt_path=/mnt/project_rlinf/mjwei/repo/hume/outputs/comet_vqh/2026-01-22/05-11-37_comet_behavior_ck32_vqh32_frozen_gpu8_lr2e-4_3e-4_3e-4_3e-4_bs48_s160k/checkpoints/002000/pretrained_model

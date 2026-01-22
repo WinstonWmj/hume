@@ -5,14 +5,14 @@ import socket
 import tyro
 
 from omnigibson.learning.utils.network_utils import WebsocketPolicyServer
-from hume.models import HumePolicy
+from hume.models import CometPolicy
 from hume.serving import websocket_policy_server
 from hume.shared.eval_b1k_wrapper import B1KPolicyWrapper
 
 
 @dataclasses.dataclass
 class Args:
-    """Arguments for the serve_policy script."""
+    """Arguments for the serve_policy script for CometPolicy."""
 
     # If provided, will be used to retrieve the prompt of the task, otherwise use turning_on_radio as default.
     task_name: str | None = None
@@ -34,12 +34,14 @@ class Args:
     temporal_ensemble_max: int = 3  # receeding temporal mode
 
     resize_size: int = 224
-    replan_steps: int = 5
+    replan_steps: int = 32  # CometPolicy uses chunk_size=32
 
     post_process_action: bool = True
 
-    s2_replan_steps: int = 10
-    s2_candidates_num: int = 5  # Batch of N 从 5 个候选中选最合适的动作
+    # Note: CometPolicy doesn't use S2 candidate selection like HumePolicy
+    # These are kept for compatibility but not used by CometPolicy
+    s2_replan_steps: int = 32
+    s2_candidates_num: int = 5
     noise_temp_lower_bound: float = 1.0
     noise_temp_upper_bound: float = 2.0
     time_temp_lower_bound: float = 0.9
@@ -48,22 +50,20 @@ class Args:
 
 def main(args: Args) -> None:
     logging.info(f"Using task_name: {args.task_name}")
-    hume = HumePolicy.from_pretrained(args.ckpt_path).to("cuda")
-    hume.init_infer(
+    logging.info(f"Loading CometPolicy from: {args.ckpt_path}")
+    
+    # Load CometPolicy instead of HumePolicy
+    comet_policy = CometPolicy.from_pretrained(args.ckpt_path).to("cuda")
+    comet_policy.init_infer(
         infer_cfg=dict(
             replan_steps=args.replan_steps,
-            s2_replan_steps=args.s2_replan_steps,
-            s2_candidates_num=args.s2_candidates_num,
-            noise_temp_lower_bound=args.noise_temp_lower_bound,
-            noise_temp_upper_bound=args.noise_temp_upper_bound,
-            time_temp_lower_bound=args.time_temp_lower_bound,
-            time_temp_upper_bound=args.time_temp_upper_bound,
             post_process_action=args.post_process_action,
             device="cuda",
         )
     )
-    hume = B1KPolicyWrapper(
-        hume,
+    
+    policy = B1KPolicyWrapper(
+        comet_policy,
         task_name=args.task_name,
         control_mode=args.control_mode,
         max_len=args.replan_steps,
@@ -81,11 +81,11 @@ def main(args: Args) -> None:
     # with open("/mnt/public/mjwei/.cursor/debug_obs.pkl", "rb") as f:
     #     obs = pickle.load(f)
     # # then directly call policy.act(obs) to debug
-    # action = hume.act(obs)
+    # action = policy.act(obs)
     # print(action)
     # return
     server = WebsocketPolicyServer(
-        policy=hume,
+        policy=policy,
         host="0.0.0.0",
         port=args.port,
         metadata={},

@@ -317,8 +317,27 @@ class PI0Pytorch(nn.Module):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, images, img_masks, lang_tokens, lang_masks, state, noise=None, num_steps=10) -> Tensor:
-        """Do a full inference forward and compute the action."""
+    def sample_actions(
+        self, 
+        device, 
+        images, 
+        img_masks, 
+        lang_tokens, 
+        lang_masks, 
+        state, 
+        noise=None, 
+        num_steps=10,
+        time_temp=1.0,
+        noise_temp=1.0,
+    ) -> Tensor:
+        """Do a full inference forward and compute the action.
+        
+        Args:
+            time_temp: Temperature for initial time value. Default 1.0 means start from t=1.
+                       Values > 1.0 start from higher time values for more diversity.
+            noise_temp: Temperature for noise scaling. Default 1.0.
+                       Values > 1.0 increase the step size for more diversity.
+        """
         bsize = state.shape[0]
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
@@ -343,7 +362,8 @@ class PI0Pytorch(nn.Module):
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
         x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        # time_temp controls the starting point of denoising (higher = more diversity)
+        time = torch.tensor(time_temp, dtype=torch.float32, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(
@@ -353,7 +373,8 @@ class PI0Pytorch(nn.Module):
                 x_t,
                 expanded_time,
             )
-            x_t = x_t + dt * v_t
+            # noise_temp scales the denoising step (higher = more diversity)
+            x_t = x_t + dt * v_t * noise_temp
             time += dt
         return x_t
 

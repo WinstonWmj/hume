@@ -38,10 +38,9 @@ class Args:
 
     post_process_action: bool = True
 
-    # Note: CometPolicy doesn't use S2 candidate selection like HumePolicy
-    # These are kept for compatibility but not used by CometPolicy
-    s2_replan_steps: int = 32
-    s2_candidates_num: int = 5
+    # VQH candidate selection parameters (now used by CometPolicy)
+    use_vqh_selection: bool = True  # Enable VQH-based candidate selection
+    s2_candidates_num: int = 5      # Number of candidate actions to generate
     noise_temp_lower_bound: float = 1.0
     noise_temp_upper_bound: float = 2.0
     time_temp_lower_bound: float = 0.9
@@ -59,6 +58,11 @@ def main(args: Args) -> None:
             replan_steps=args.replan_steps,
             post_process_action=args.post_process_action,
             device="cuda",
+            # VQH candidate selection parameters
+            use_vqh_selection=args.use_vqh_selection,
+            s2_candidates_num=args.s2_candidates_num,
+            noise_temp_bounds=(args.noise_temp_lower_bound, args.noise_temp_upper_bound),
+            time_temp_bounds=(args.time_temp_lower_bound, args.time_temp_upper_bound),
         )
     )
     

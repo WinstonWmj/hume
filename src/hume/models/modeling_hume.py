@@ -2054,6 +2054,17 @@ class CometPolicy(PreTrainedPolicy):
     def init_infer(self, infer_cfg: at.InferConfig):
         """Initialize inference configuration for CometPolicy."""
         self.infer_cfg = Namespace(**infer_cfg)
+        # Set default values for candidate selection if not provided
+        if not hasattr(self.infer_cfg, 's2_candidates_num'):
+            self.infer_cfg.s2_candidates_num = 5
+        if not hasattr(self.infer_cfg, 'noise_temp_bounds'):
+            self.infer_cfg.noise_temp_bounds = (1.0, 2.0)
+        if not hasattr(self.infer_cfg, 'time_temp_bounds'):
+            self.infer_cfg.time_temp_bounds = (0.9, 1.0)
+        if not hasattr(self.infer_cfg, 'use_vqh_selection'):
+            self.infer_cfg.use_vqh_selection = True  # Enable VQH selection by default
+        self.q_value_cache = []  # Store Q values for debugging
+        self.action_cache = []   # Store actions for debugging
         self.reset()
         print("CometPolicy: Initializing inference with config:", infer_cfg)
         return True
@@ -2110,7 +2121,11 @@ class CometPolicy(PreTrainedPolicy):
     def select_action(
         self, batch: dict[str, Tensor], noise: Tensor | None = None
     ) -> Tensor:
-        """Select actions for evaluation."""
+        """Select actions for evaluation using VQH candidate selection.
+        
+        Similar to HumePolicy, generates multiple candidate actions and uses
+        ValueQueryHead to select the best one based on Q values.
+        """
         self.eval()
 
         batch = self.normalize_inputs(batch)
@@ -2119,22 +2134,85 @@ class CometPolicy(PreTrainedPolicy):
         state = self.prepare_state(batch)
         lang_tokens, lang_masks = self.prepare_language(batch)
 
-        # Sample actions using PI0
-        actions = self.pi0_model.sample_actions(
-            device=state.device,
-            images=images,
-            img_masks=img_masks,
-            lang_tokens=lang_tokens,
-            lang_masks=lang_masks,
-            state=state,
-            noise=noise,
-            num_steps=self.config.num_steps,
+        original_action_dim = self.config.action_feature.shape[0]
+
+        # Check if VQH selection is enabled and infer_cfg is available
+        use_vqh = (
+            hasattr(self, 'infer_cfg') and 
+            hasattr(self.infer_cfg, 'use_vqh_selection') and 
+            self.infer_cfg.use_vqh_selection
         )
 
-        # Unpad actions
-        original_action_dim = self.config.action_feature.shape[0]
-        actions = actions[:, :, :original_action_dim]
-        actions = self.unnormalize_outputs({"action": actions})["action"]
+        if use_vqh:
+            # Generate multiple candidate actions using different noise/time temperatures
+            s2_candidates_num = self.infer_cfg.s2_candidates_num
+            noise_temp_bounds = self.infer_cfg.noise_temp_bounds
+            time_temp_bounds = self.infer_cfg.time_temp_bounds
+
+            noise_actions = []  # [(Batch, Chunksize, Action dim),]
+            for i in range(s2_candidates_num):
+                candidate_action = self.pi0_model.sample_actions(
+                    device=state.device,
+                    images=images,
+                    img_masks=img_masks,
+                    lang_tokens=lang_tokens,
+                    lang_masks=lang_masks,
+                    state=state,
+                    noise=noise,
+                    num_steps=self.config.num_steps,
+                    time_temp=(i / s2_candidates_num)
+                    * (time_temp_bounds[1] - time_temp_bounds[0])
+                    + time_temp_bounds[0],
+                    noise_temp=(i / s2_candidates_num)
+                    * (noise_temp_bounds[1] - noise_temp_bounds[0])
+                    + noise_temp_bounds[0],
+                )
+                noise_actions.append(candidate_action)
+
+            noise_actions = torch.stack(noise_actions, dim=1)
+            # (Batch, s2_candidates_num, Chunksize, Actiondim)
+            batch_size = noise_actions.shape[0]
+            batch_idx = torch.arange(batch_size, device=noise_actions.device)
+
+            # Trim to VQH chunk size and original action dim
+            noise_actions_wo_pad = noise_actions[
+                :, :, : self.config.vqh_chunk_size, :original_action_dim
+            ]
+
+            # Use VQH to select best action based on Q values
+            action_index, q_values = self.value_query_head.select_q_actions(
+                images, img_masks, lang_tokens, lang_masks, noise_actions_wo_pad
+            )  # action_index's shape = (batch_size,), q_values's shape = (batch_size, s2_candidates_num)
+
+            # Store for debugging
+            self.q_value_cache.append(q_values.squeeze())
+            unnormalized_noise_actions = self.unnormalize_outputs(
+                {"action": noise_actions_wo_pad}
+            )["action"]
+            self.action_cache.append(unnormalized_noise_actions.squeeze())
+
+            # Select the best candidate action
+            selected_actions = noise_actions[batch_idx, action_index]
+
+            # Unpad and unnormalize
+            actions = selected_actions[:, :, :original_action_dim]
+            actions = self.unnormalize_outputs({"action": actions})["action"]
+        else:
+            # Simple mode: just sample once without VQH selection
+            actions = self.pi0_model.sample_actions(
+                device=state.device,
+                images=images,
+                img_masks=img_masks,
+                lang_tokens=lang_tokens,
+                lang_masks=lang_masks,
+                state=state,
+                noise=noise,
+                num_steps=self.config.num_steps,
+            )
+
+            # Unpad actions
+            actions = actions[:, :, :original_action_dim]
+            actions = self.unnormalize_outputs({"action": actions})["action"]
 
         return actions
 

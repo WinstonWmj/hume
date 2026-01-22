@@ -2391,7 +2391,15 @@ class CometPolicy(PreTrainedPolicy):
 
             incompatible = policy.load_state_dict(filtered_state_dict, strict=False)
             if incompatible.missing_keys:
-                print(f"Missing keys: {len(incompatible.missing_keys)}")
+                # Filter out weight-tied keys (embed_tokens shares weight with lm_head)
+                non_tied_missing = [k for k in incompatible.missing_keys if "embed_tokens" not in k]
+                if non_tied_missing:
+                    print(f"Missing keys: {len(non_tied_missing)}")
+                    for mk in non_tied_missing[:5]:
+                        print(f"  - {mk}")
+                else:
+                    # Only embed_tokens missing - this is expected due to weight tying
+                    print(f"Missing keys: {len(incompatible.missing_keys)} (all are weight-tied embed_tokens, expected)")
             if incompatible.unexpected_keys:
                 print(f"Unexpected keys: {len(incompatible.unexpected_keys)}")
 

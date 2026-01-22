@@ -8,63 +8,99 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
+
+# 合并 openpi-comet 和 hume 的依赖
+# 基于 openpi-comet 的依赖，但使用 hume 版本的 lerobot（有 lerobot.common.* 模块）
 dependencies = [
-    "transformers @ git+https://github.com/huggingface/transformers@6daa3eeba582facb57cd71db8efb66998b12942f",
-    "tyro==0.8.10",
-    "numpy==1.26.4",
-    "jaxtyping==0.3.1",
-    "beartype==0.20.2",
-    "lerobot @ git+https://github.com/huggingface/lerobot@768e36660d1408c71118a2760f831c037fbfa17d",
+    # === openpi-comet 核心依赖 ===
+    "augmax>=0.3.4",
+    "dm-tree>=0.1.8",
+    "einops>=0.8.0",
+    "equinox>=0.11.8",
+    "flatbuffers>=24.3.25",
+    "flax==0.10.2",
+    "fsspec[gcs]>=2024.6.0",
+    "imageio>=2.36.1",
+    "jax[cuda12]==0.5.3",
+    "ml_collections==1.0.0",
+    "numpydantic>=1.6.6",
+    "opencv-python>=4.10.0.84",
+    "orbax-checkpoint==0.11.13",
+    "pillow>=11.0.0",
+    "sentencepiece>=0.2.0",
+    "tqdm-loggable>=0.2",
+    "typing-extensions>=4.12.2",
+    "wandb>=0.19.1",
+    "filelock>=3.16.1",
+    "treescope>=0.1.7",
+    "rich>=14.0.0",
+    "polars>=1.30.0",
+    
+    # === 版本固定（兼容性关键） ===
+    "transformers==4.53.2",
+    "huggingface-hub>=0.30.0,<1.0",  # transformers 4.53.2 要求
+    "datasets>=3.0.0,<4.0.0",        # lerobot 兼容性
+    "numpy>=1.22.4,<2.0.0",
+    "jaxtyping==0.2.36",
+    "beartype==0.19.0",
+    "tyro>=0.9.5",
+    
+    # === hume 特有依赖 ===
+    "lerobot",  # 使用 hume 版本，通过 [tool.uv.sources] 指定
+    "accelerate>=1.5.2",
     "ipdb",
-    "accelerate==1.5.2",
-    "pytest",
-    "openpi-client"
+    "pytest>=8.3.4",
+    "openpi-client",
 ]
 
 [project.urls]
 Homepage = "https://hume-vla.github.io"
 "Bug Tracker" = "https://hume-vla.github.io"
 
+[dependency-groups]
+dev = [
+    "ruff>=0.8.6",
+    "pre-commit>=4.0.1",
+    "ipykernel>=6.29.5",
+    "ipywidgets>=8.1.5",
+    "matplotlib>=3.10.0",
+    "pynvml>=12.0.0",
+]
 
+# === uv 配置 ===
+[tool.uv]
+# 覆盖依赖版本以确保兼容性
+override-dependencies = [
+    "ml-dtypes==0.4.1",
+    "tensorstore==0.1.74",
+    "av>=16.0.0",  # 使用预编译 wheel，避免源码编译需要 ffmpeg 7
+]
+allow-insecure-host = ["mirrors.cloud.aliyuncs.com"]
+
+[tool.uv.sources]
+# 关键：使用 hume 版本的 lerobot（有 lerobot.common.* 模块）
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "768e36660d1408c71118a2760f831c037fbfa17d" }
+openpi-client = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# === Ruff 配置 ===
 [tool.ruff]
 line-length = 88
 indent-width = 4
-extend-exclude = ["3rd"]
-
-
+extend-exclude = ["3rd", "docker", "third_party"]
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
-ignore = ["F722"]
+ignore = ["F722", "T201"]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 
-
-[tool.uv.sources]
-torch = { index = "pytorch" }
-torchvision = { index = "pytorch" }
-torchaudio = { index = "pytorch" }
-lerobot = { git = "https://github.com/huggingface/lerobot", rev = "768e36660d1408c71118a2760f831c037fbfa17d" }
-transformers = { git = "https://github.com/huggingface/transformers", rev = "6daa3eeba582facb57cd71db8efb66998b12942f"}
-openpi-client = { path = "packages/openpi-client" }
-
-
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu121"
-explicit = true
-
-# [[tool.uv.index]]
-# name = "aliyun"
-# url = "https://mirrors.cloud.aliyuncs.com/pypi/simple"
-
-[tool.uv]
-allow-insecure-host = ["mirrors.cloud.aliyuncs.com"]
-
-
+# === 构建配置 ===
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -78,3 +114,7 @@ exclude = [".assets", "dist*", "playground*", "scripts*", "shell*", "test", "out
 
 [tool.wheel]
 exclude = [".assets", "dist*", "playground*", "scripts*", "shell*", "test", "outputs"]
+
+[tool.pytest.ini_options]
+markers = ["manual: should be run manually."]
+testpaths = ["src", "scripts"]

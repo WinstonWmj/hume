@@ -5,7 +5,7 @@ if [ "$DEBUG" = true ]; then
   wandb_enable=false
   ACCELERATE_ARGS="--num_machines 1 --num_processes ${GPUS} --mixed_precision=bf16 --dynamo_backend=no"
   num_workers=8
-  save_freq=100
+  save_freq=10
   steps=2000
 fi
 
@@ -16,7 +16,7 @@ NODES=$((GPUS / GPUS_PER_NODE))
 PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-48}
 wandb_enable=${wandb_enable:-true}
 wandb_mode=${wandb_mode:-offline}
-num_workers=${num_workers:-16}  # 2 workers per GPU for 8 GPUs
+num_workers=${num_workers:-8}  # 2 workers per GPU for 8 GPUs
 
 # set environments
 source scripts/env.behavior.sh
@@ -49,7 +49,7 @@ data_map["behavior"]=behavior
 
 # Comet weights path
 declare -A pretrained_comet_map
-pretrained_comet_map["behavior"]=/mnt/project_rlinf/mjwei/download_models/openpi_comet/sunshk/comet_weights_pytorch_2/pi05-b1kpt12-cs32
+pretrained_comet_map["behavior"]=/mnt/project_rlinf/mjwei/download_models/openpi_comet/sunshk/comet_weights_pytorch_2/pi05-b1kpt12-cs32/
 
 data_name=behavior
 dataset=${data_map[$data_name]}

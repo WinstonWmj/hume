@@ -72,11 +72,9 @@ class PaliGemmaWithExpertModel(nn.Module):
             raise ValueError(f"Invalid precision: {precision}")
 
         params_to_keep_float32 = [
-            # SigLIP Vision Tower - keep entire vision tower in float32 for LayerNorm stability
-            "vision_tower",
-            # Multi-modal projector (connects vision to language) - must match vision_tower dtype
-            "multi_modal_projector",
-            # Gemma LayerNorm parameters
+            "vision_tower.vision_model.embeddings.patch_embedding.weight",
+            "vision_tower.vision_model.embeddings.patch_embedding.bias",
+            "vision_tower.vision_model.embeddings.position_embedding.weight",
             "input_layernorm",
             "post_attention_layernorm",
             "model.norm",
@@ -87,16 +85,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                 param.data = param.data.to(dtype=torch.float32)
 
     def embed_image(self, image: torch.Tensor):
-        # SigLIP Vision Encoder requires float32 input for LayerNorm compatibility
-        # even when the model is in bfloat16 precision
-        image = image.to(dtype=torch.float32)
-        image_features = self.paligemma.get_image_features(image)
-        # Convert output back to bfloat16 to match the rest of the model
-        return image_features.to(dtype=torch.bfloat16)
+        return self.paligemma.model.get_image_features(image)
 
     def embed_language_tokens(self, tokens: torch.Tensor):
-        # Use get_input_embeddings() for compatibility across transformers versions
-        return self.paligemma.get_input_embeddings()(tokens)
+        return self.paligemma.language_model.embed_tokens(tokens)
 
     def forward(
         self,
@@ -110,9 +102,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         if adarms_cond is None:
             adarms_cond = [None, None]
         if inputs_embeds[1] is None:
-            # Use language_model.model (GemmaModel) instead of language_model (GemmaForCausalLM)
-            # because GemmaModel outputs BaseModelOutputWithPast which has last_hidden_state
-            prefix_output = self.paligemma.language_model.model.forward(
+            prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -124,35 +114,19 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
         elif inputs_embeds[0] is None:
-            # Gemma Expert expects bfloat16 input
-            suffix_embs = inputs_embeds[1]
-            if suffix_embs.dtype != torch.bfloat16:
-                suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
-            
-            # Calculate cache_position for HuggingFace's causal mask computation
-            # When using past_key_values, cache_position tells HF where the current tokens are
-            # in the full sequence (past + current)
-            cache_position = None
-            if past_key_values is not None:
-                past_len = past_key_values[0][0].shape[2]  # (batch, num_heads, seq_len, head_dim)
-                suffix_len = suffix_embs.shape[1]
-                cache_position = torch.arange(past_len, past_len + suffix_len, device=suffix_embs.device)
-            
             suffix_output = self.gemma_expert.model.forward(
-                inputs_embeds=suffix_embs,
+                inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
-                cache_position=cache_position,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
         else:
-            # Use language_model.model (GemmaModel) to access layers and rotary_emb
-            models = [self.paligemma.language_model.model, self.gemma_expert.model]
+            models = [self.paligemma.language_model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
             use_gradient_checkpointing = (
@@ -162,7 +136,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             )
 
             def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
-                models = [self.paligemma.language_model.model, self.gemma_expert.model]
+                models = [self.paligemma.language_model, self.gemma_expert.model]
 
                 query_states = []
                 key_states = []
@@ -170,15 +144,11 @@ class PaliGemmaWithExpertModel(nn.Module):
                 gates = []
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
-                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
-                    if adarms_cond is not None and adarms_cond[i] is not None:
-                        hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
-                    else:
-                        hidden_states = layer.input_layernorm(hidden_states)
-                        gate = None
+                    hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])
                     gates.append(gate)
 
                     # Convert to bfloat16 if the layer uses bfloat16 weights
+                    # (input_layernorm outputs float32 for stability, but q_proj expects bfloat16)
                     if layer.self_attn.q_proj.weight.dtype == torch.bfloat16:
                         hidden_states = hidden_states.to(dtype=torch.bfloat16)
 
@@ -203,23 +173,23 @@ class PaliGemmaWithExpertModel(nn.Module):
                     device=query_states.device,
                     dtype=query_states.dtype,
                 )
-                cos, sin = self.paligemma.language_model.model.rotary_emb(dummy_tensor, position_ids)
+                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
                 query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
                     query_states, key_states, cos, sin, unsqueeze_dim=1
                 )
 
                 batch_size = query_states.shape[0]
-                scaling = self.paligemma.language_model.model.layers[layer_idx].self_attn.scaling
+                scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
 
                 att_output, _ = modeling_gemma.eager_attention_forward(
-                    self.paligemma.language_model.model.layers[layer_idx].self_attn,
+                    self.paligemma.language_model.layers[layer_idx].self_attn,
                     query_states,
                     key_states,
                     value_states,
                     attention_mask,
                     scaling,
                 )
-                head_dim = self.paligemma.language_model.model.layers[layer_idx].self_attn.head_dim
+                head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
                 att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
 
                 outputs_embeds = []
@@ -232,27 +202,17 @@ class PaliGemmaWithExpertModel(nn.Module):
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
                     out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
 
-                    # Support both standard HuggingFace (no gate) and modified version (with gate)
-                    if gates[i] is not None:
-                        out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
-                    else:
-                        out_emb = hidden_states + out_emb  # Standard residual connection
+                    # first residual
+                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])
                     after_first_residual = out_emb.clone()
-                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
-                    if adarms_cond is not None and adarms_cond[i] is not None:
-                        out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
-                    else:
-                        out_emb = layer.post_attention_layernorm(out_emb)
-                        gate = None
+                    out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+                    # Convert to bfloat16 if the next layer (mlp) uses bfloat16
                     if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
                         out_emb = out_emb.to(dtype=torch.bfloat16)
 
                     out_emb = layer.mlp(out_emb)
-                    # Support both standard HuggingFace (no gate) and modified version (with gate)
-                    if gate is not None:
-                        out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
-                    else:
-                        out_emb = after_first_residual + out_emb  # Standard residual connection
+                    # second residual
+                    out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)
                     outputs_embeds.append(out_emb)
                     start_pos = end_pos
 
@@ -278,11 +238,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             def compute_final_norms(inputs_embeds, adarms_cond):
                 outputs_embeds = []
                 for i, hidden_states in enumerate(inputs_embeds):
-                    # Support both standard HuggingFace (no cond param) and modified version (with cond param)
-                    if adarms_cond is not None and adarms_cond[i] is not None:
-                        out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
-                    else:
-                        out_emb = models[i].norm(hidden_states)
+                    out_emb, _ = models[i].norm(hidden_states, cond=adarms_cond[i])
                     outputs_embeds.append(out_emb)
                 return outputs_embeds
 
@@ -298,4 +254,3 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_past_key_values = None
 
         return [prefix_output, suffix_output], prefix_past_key_values
-

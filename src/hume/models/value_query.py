@@ -163,7 +163,8 @@ class VQHBackbone(PreTrainedModel):
         ]:
             # normalizer = torch.tensor(model.config.hidden_size**0.5, dtype=hidden_states.dtype)
             # hidden_states = hidden_states * normalizer
-            hidden_states = layer.input_layernorm(hidden_states)
+            # openpi-comet's modified GemmaRMSNorm returns (hidden_states, gate) tuple
+            hidden_states, _ = layer.input_layernorm(hidden_states)
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
 
@@ -194,14 +195,16 @@ class VQHBackbone(PreTrainedModel):
             # first residual
             out_emb += hidden_states
             after_first_residual = out_emb.clone()
-            out_emb = layer.post_attention_layernorm(out_emb)
+            # openpi-comet's modified GemmaRMSNorm returns (hidden_states, gate) tuple
+            out_emb, _ = layer.post_attention_layernorm(out_emb)
             out_emb = layer.mlp(out_emb)
             # second residual
             out_emb += after_first_residual
             hidden_states = out_emb
 
         # final norm
-        hidden_states = self.gemma_expert.model.norm(hidden_states)
+        # openpi-comet's modified GemmaRMSNorm returns (hidden_states, gate) tuple
+        hidden_states, _ = self.gemma_expert.model.norm(hidden_states)
 
         return hidden_states
 

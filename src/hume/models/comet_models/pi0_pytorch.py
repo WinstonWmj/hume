@@ -454,14 +454,14 @@ class PI0Pytorch(nn.Module):
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
 
         # Use else branch: both prefix_embs and suffix_embs are provided, no KV cache
-        # Pass adarms_cond=[None, None] to use standard HuggingFace without cond param
+        # openpi-comet's modified transformers expects adarms_cond
         (prefix_out, suffix_out), _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=None,
             inputs_embeds=[prefix_embs, suffix_embs],
             use_cache=False,
-            adarms_cond=[None, None],  # Use None to be compatible with standard HuggingFace
+            adarms_cond=[None, adarms_cond],
         )
 
         suffix_out = suffix_out[:, -self.config.action_horizon :]

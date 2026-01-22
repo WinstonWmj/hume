@@ -72,9 +72,11 @@ class PaliGemmaWithExpertModel(nn.Module):
             raise ValueError(f"Invalid precision: {precision}")
 
         params_to_keep_float32 = [
-            "vision_tower.vision_model.embeddings.patch_embedding.weight",
-            "vision_tower.vision_model.embeddings.patch_embedding.bias",
-            "vision_tower.vision_model.embeddings.position_embedding.weight",
+            # SigLIP Vision Tower - keep entire vision tower in float32 for LayerNorm stability
+            "vision_tower",
+            # Multi-modal projector (connects vision to language) - must match vision_tower dtype
+            "multi_modal_projector",
+            # Gemma LayerNorm parameters
             "input_layernorm",
             "post_attention_layernorm",
             "model.norm",
@@ -85,7 +87,12 @@ class PaliGemmaWithExpertModel(nn.Module):
                 param.data = param.data.to(dtype=torch.float32)
 
     def embed_image(self, image: torch.Tensor):
-        return self.paligemma.get_image_features(image)
+        # SigLIP Vision Encoder requires float32 input for LayerNorm compatibility
+        # even when the model is in bfloat16 precision
+        image = image.to(dtype=torch.float32)
+        image_features = self.paligemma.get_image_features(image)
+        # Convert output back to bfloat16 to match the rest of the model
+        return image_features.to(dtype=torch.bfloat16)
 
     def embed_language_tokens(self, tokens: torch.Tensor):
         # Use get_input_embeddings() for compatibility across transformers versions
@@ -103,7 +110,9 @@ class PaliGemmaWithExpertModel(nn.Module):
         if adarms_cond is None:
             adarms_cond = [None, None]
         if inputs_embeds[1] is None:
-            prefix_output = self.paligemma.language_model.forward(
+            # Use language_model.model (GemmaModel) instead of language_model (GemmaForCausalLM)
+            # because GemmaModel outputs BaseModelOutputWithPast which has last_hidden_state
+            prefix_output = self.paligemma.language_model.model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -115,19 +124,35 @@ class PaliGemmaWithExpertModel(nn.Module):
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
         elif inputs_embeds[0] is None:
+            # Gemma Expert expects bfloat16 input
+            suffix_embs = inputs_embeds[1]
+            if suffix_embs.dtype != torch.bfloat16:
+                suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            
+            # Calculate cache_position for HuggingFace's causal mask computation
+            # When using past_key_values, cache_position tells HF where the current tokens are
+            # in the full sequence (past + current)
+            cache_position = None
+            if past_key_values is not None:
+                past_len = past_key_values[0][0].shape[2]  # (batch, num_heads, seq_len, head_dim)
+                suffix_len = suffix_embs.shape[1]
+                cache_position = torch.arange(past_len, past_len + suffix_len, device=suffix_embs.device)
+            
             suffix_output = self.gemma_expert.model.forward(
-                inputs_embeds=inputs_embeds[1],
+                inputs_embeds=suffix_embs,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
+                cache_position=cache_position,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
         else:
-            models = [self.paligemma.language_model, self.gemma_expert.model]
+            # Use language_model.model (GemmaModel) to access layers and rotary_emb
+            models = [self.paligemma.language_model.model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
             use_gradient_checkpointing = (
@@ -137,7 +162,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             )
 
             def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
-                models = [self.paligemma.language_model, self.gemma_expert.model]
+                models = [self.paligemma.language_model.model, self.gemma_expert.model]
 
                 query_states = []
                 key_states = []
@@ -169,23 +194,23 @@ class PaliGemmaWithExpertModel(nn.Module):
                     device=query_states.device,
                     dtype=query_states.dtype,
                 )
-                cos, sin = self.paligemma.language_model.rotary_emb(dummy_tensor, position_ids)
+                cos, sin = self.paligemma.language_model.model.rotary_emb(dummy_tensor, position_ids)
                 query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
                     query_states, key_states, cos, sin, unsqueeze_dim=1
                 )
 
                 batch_size = query_states.shape[0]
-                scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
+                scaling = self.paligemma.language_model.model.layers[layer_idx].self_attn.scaling
 
                 att_output, _ = modeling_gemma.eager_attention_forward(
-                    self.paligemma.language_model.layers[layer_idx].self_attn,
+                    self.paligemma.language_model.model.layers[layer_idx].self_attn,
                     query_states,
                     key_states,
                     value_states,
                     attention_mask,
                     scaling,
                 )
-                head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
+                head_dim = self.paligemma.language_model.model.layers[layer_idx].self_attn.head_dim
                 att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
 
                 outputs_embeds = []

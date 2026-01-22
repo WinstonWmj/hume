@@ -10,7 +10,6 @@ PYTHONUNBUFFERED=1 python src/hume/serve_b1k_comet.py \
     --task-name=turning_on_radio \
     --control-mode=receeding_horizon \
     --replan-steps=32  \
-    --s2-replan-steps=32 \
     --s2-candidates-num=5 \
     --no-post-process-action \
     --ckpt_path=/mnt/project_rlinf/mjwei/repo/hume/outputs/comet_vqh/2026-01-22/05-11-37_comet_behavior_ck32_vqh32_frozen_gpu8_lr2e-4_3e-4_3e-4_3e-4_bs48_s160k/checkpoints/002000/pretrained_model

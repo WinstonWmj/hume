@@ -2456,7 +2456,9 @@ class CometValueQueryHead(nn.Module):
     def __init__(self, paligemma_with_expert, config):
         super().__init__()
         self.config = config
-        self.paligemma_with_expert = paligemma_with_expert
+        # Store paligemma_with_expert as a non-registered reference to avoid
+        # duplicating it in state_dict (it's already part of pi0_model)
+        object.__setattr__(self, '_paligemma_with_expert', paligemma_with_expert)
 
         # VQH backbone
         vqh_backbone_config = VQHBackboneConfig()
@@ -2490,6 +2492,11 @@ class CometValueQueryHead(nn.Module):
         self.query_embedding = nn.Parameter(
             torch.zeros(hidden_size, dtype=torch.bfloat16)
         )
+
+    @property
+    def paligemma_with_expert(self):
+        """Access paligemma_with_expert without registering it as a submodule."""
+        return self._paligemma_with_expert
 
     def embed_prefix(
         self, images, img_masks, lang_tokens, lang_masks

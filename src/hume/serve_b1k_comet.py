@@ -4,7 +4,7 @@ import socket
 
 import tyro
 
-from omnigibson.learning.utils.network_utils import WebsocketPolicyServer
+# from omnigibson.learning.utils.network_utils import WebsocketPolicyServer
 from hume.models import CometPolicy
 from hume.serving import websocket_policy_server
 from hume.shared.eval_b1k_wrapper import B1KPolicyWrapper
@@ -80,14 +80,14 @@ def main(args: Args) -> None:
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
-    # # for debug
-    # import pickle
-    # with open("/mnt/public/mjwei/.cursor/debug_obs.pkl", "rb") as f:
-    #     obs = pickle.load(f)
-    # # then directly call policy.act(obs) to debug
-    # action = policy.act(obs)
-    # print(action)
-    # return
+    # for debug
+    import pickle
+    with open("/mnt/project_rlinf/mjwei/repo/hume/.cursor/debug_obs.pkl", "rb") as f:
+        obs = pickle.load(f)
+    # then directly call policy.act(obs) to debug
+    action = policy.act(obs)
+    print(action)
+    return
     server = WebsocketPolicyServer(
         policy=policy,
         host="0.0.0.0",

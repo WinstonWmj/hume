@@ -13,6 +13,9 @@ outputs
 # VS Code
 .vscode
 
+# Cursor
+.cursor/
+
 # HPC
 nautilus/*.yaml
 *.key
